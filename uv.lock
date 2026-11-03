@@ -4002,7 +4002,7 @@ wheels = [
 ]
 
 [[package]]
-name = "stt-eval"
+name = "stt-lab"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

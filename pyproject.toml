@@ -1,5 +1,5 @@
 [project]
-name = "stt-eval"
+name = "stt-lab"
 version = "0.1.0"
 description = "Local meeting transcription (Whisper medium + pyannote) with speaker labels, English output and LLM hand-off"
 readme = "README.md"

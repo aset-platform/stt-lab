@@ -41,8 +41,8 @@ Requirements: **Apple Silicon Mac** (M1 or newer; MLX does not run on Intel Macs
 ### 1. Clone and install
 
 ```bash
-git clone git@github.com:aset-platform/stt-eval.git    # private repo: needs access to the aset-platform org
-cd stt-eval
+git clone git@github.com:aset-platform/stt-lab.git    # private repo: needs access to the aset-platform org
+cd stt-lab
 uv sync                                  # Python 3.11 + all dependencies into .venv (~2 GB, a few minutes)
 ```
 
