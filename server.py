@@ -392,7 +392,8 @@ def library_summary(name: str):
 # ---------- LLM summaries ----------
 @app.get("/api/llm/status")
 def llm_status():
-    return {**summarise.check(), "queued": summarise.queued()}
+    # a recording being auto-summarised is still in the inbox; don't offer it for a second run
+    return {**summarise.check(), "queued": [n for n in summarise.queued() if n not in busy]}
 
 
 @app.post("/api/llm/summarise")
@@ -407,11 +408,27 @@ async def llm_summarise(names: list[str] = Body(embed=True)):
     results = []
     for name in names:
         try:
-            notes = await loop.run_in_executor(worker, summarise.summarise_one, name)
-            results.append({"name": name, "ok": True, "action_items": len(notes.get("action_items", []))})
+            notes = await loop.run_in_executor(worker, summarise_queued, name)
+            if notes is None:  # an auto-summary got to it first
+                results.append({"name": name, "ok": True, "skipped": "already summarised"})
+            else:
+                results.append({"name": name, "ok": True, "action_items": len(notes.get("action_items", []))})
         except Exception as e:
             results.append({"name": name, "ok": False, "error": f"{type(e).__name__}: {e}"})
     return {"results": results}
+
+
+def summarise_queued(name):
+    """Job-thread body of a manual summary. Returns None when the recording was summarised while this
+    request waited its turn (it's no longer queued, but its summary exists)."""
+    library.audio_path(name)  # validates the name before it's used in a path
+    if name not in summarise.queued() and (library.LLM_SUMMARIES / f"{name}.json").is_file():
+        return None
+    busy.add(name)
+    try:
+        return summarise.summarise_one(name)
+    finally:
+        busy.discard(name)
 
 
 @app.post("/api/upload")
