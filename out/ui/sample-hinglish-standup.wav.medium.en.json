@@ -1,0 +1,68 @@
+{
+ "recording": "sample-hinglish-standup.wav",
+ "stats": {
+  "duration": 35.17675,
+  "transcribe_s": 3.9272770829265937,
+  "diarize_s": 3.9582262500189245,
+  "speakers": 2,
+  "languages": [
+   "hi"
+  ],
+  "model": "medium",
+  "task": "translate",
+  "lang": "auto",
+  "created": "2026-11-02T23:14:05",
+  "total_s": 7.886744707939215,
+  "rtf": 0.22420333623598585
+ },
+ "lines": [
+  {
+   "speaker": "SPEAKER_00",
+   "start": 0.0,
+   "end": 3.78,
+   "text": "Hello everyone, let's start today's standard meeting."
+  },
+  {
+   "speaker": "SPEAKER_00",
+   "start": 4.06,
+   "end": 6.1,
+   "text": "First, tell us about the update of the new mobile app."
+  },
+  {
+   "speaker": "SPEAKER_01",
+   "start": 7.38,
+   "end": 11.78,
+   "text": "Good morning, the login screen is done and testing will finish by Wednesday."
+  },
+  {
+   "speaker": "SPEAKER_00",
+   "start": 12.74,
+   "end": 17.42,
+   "text": "Very good, but the payment part is still pending. What is its plan?"
+  },
+  {
+   "speaker": "SPEAKER_01",
+   "start": 18.48,
+   "end": 22.26,
+   "text": "We need one more day for payments. I will share the demo on Thursday."
+  },
+  {
+   "speaker": "SPEAKER_00",
+   "start": 23.032,
+   "end": 28.532,
+   "text": "Okay, we will finalize the release date after the demo on Thursday. Any other questions?"
+  },
+  {
+   "speaker": "SPEAKER_01",
+   "start": 29.472,
+   "end": 32.312,
+   "text": "No questions from my side. Thank you."
+  },
+  {
+   "speaker": "SPEAKER_00",
+   "start": 32.712,
+   "end": 34.312,
+   "text": "Thank you. See you tomorrow."
+  }
+ ]
+}

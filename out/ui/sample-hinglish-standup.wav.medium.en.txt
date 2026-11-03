@@ -1,0 +1,8 @@
+[00:00:00] SPEAKER_00: Hello everyone, let's start today's standard meeting.
+[00:00:04] SPEAKER_00: First, tell us about the update of the new mobile app.
+[00:00:07] SPEAKER_01: Good morning, the login screen is done and testing will finish by Wednesday.
+[00:00:12] SPEAKER_00: Very good, but the payment part is still pending. What is its plan?
+[00:00:18] SPEAKER_01: We need one more day for payments. I will share the demo on Thursday.
+[00:00:23] SPEAKER_00: Okay, we will finalize the release date after the demo on Thursday. Any other questions?
+[00:00:29] SPEAKER_01: No questions from my side. Thank you.
+[00:00:32] SPEAKER_00: Thank you. See you tomorrow.

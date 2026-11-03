@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Transcribe Lab</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e3e2dd;
+  --accent: #2f5bd3; --accent-text: #ffffff; --active: #eef2fd; --danger: #c43d2f; --ok: #2e7d4f;
+  --s0: #2f5bd3; --s1: #c2571a; --s2: #2e7d4f; --s3: #8a3fb8; --s4: #b8860b; --s5: #1f8a9a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9b9a94; --border: #33322f;
+    --accent: #7b9cf5; --accent-text: #10131c; --active: #232a3d; --danger: #ef7a6c; --ok: #6cc596;
+    --s0: #7b9cf5; --s1: #f0985a; --s2: #6cc596; --s3: #c08be6; --s4: #e2bd55; --s5: #5fc6d4;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
+header h1 { font-size: 16px; margin: 0; }
+header span { color: var(--muted); font-size: 12px; }
+main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; height: calc(100vh - 53px); }
+@media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+button, select, input { font: inherit; color: var(--text); }
+button { border: 1px solid var(--border); background: var(--panel); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.copied { color: var(--ok); border-color: var(--ok); }
+.dtools { float: right; margin-left: 12px; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.rec { color: var(--danger); border-color: var(--danger); }
+select, input[type=number], input[type=text], input[type=url] { background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; }
+#drop { border: 1.5px dashed var(--border); border-radius: 8px; padding: 16px; text-align: center; color: var(--muted); cursor: pointer; }
+#drop.over { border-color: var(--accent); color: var(--accent); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#recState { margin-top: 10px; display: none; align-items: center; gap: 10px; }
+#recState.on { display: flex; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+#meter { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+#meter div { height: 100%; width: 0; background: var(--ok); transition: width .08s; }
+.hint { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+#list { overflow-y: auto; flex: 1; min-height: 120px; }
+#list .item { padding: 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+#list .item:hover { border-color: var(--border); }
+#list .item.sel { background: var(--active); border-color: var(--accent); }
+#list .name { word-break: break-all; }
+#list .meta { font-size: 12px; color: var(--muted); }
+section.main { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+audio { width: 100%; }
+#title { font-weight: 600; margin-bottom: 8px; word-break: break-all; }
+.stats { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; }
+.stats b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.stats span { color: var(--muted); font-size: 12px; }
+#progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 10px; }
+#progress div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+#status { color: var(--muted); font-size: 13px; margin-top: 6px; min-height: 20px; }
+#status.err { color: var(--danger); }
+#transcript { flex: 1; overflow-y: auto; min-height: 200px; }
+.line { display: grid; grid-template-columns: 64px 96px 1fr; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.line:hover { background: var(--bg); }
+.line.now { background: var(--active); }
+.line .t { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; padding-top: 2px; }
+.line .spk { font-weight: 600; font-size: 12px; padding-top: 2px; }
+.line .spk.pending { color: var(--muted); font-weight: 400; }
+.empty { color: var(--muted); text-align: center; padding: 40px 0; }
+main[hidden] { display: none; }
+nav.tabs { display: flex; gap: 4px; margin-left: 24px; align-self: center; }
+nav.tabs button { border: none; background: none; padding: 4px 12px; border-radius: 6px; color: var(--muted); }
+nav.tabs button.on { background: var(--active); color: var(--accent); font-weight: 600; }
+#viewManage { grid-template-columns: 220px 1fr; }
+#folders .f { display: flex; justify-content: space-between; padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+#folders .f:hover { background: var(--bg); }
+#folders .f.sel { background: var(--active); color: var(--accent); font-weight: 600; }
+#folders .f span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+#llmBox { margin-top: 16px; font-size: 13px; }
+#llmBox .chip { display: inline-flex; align-items: center; gap: 6px; }
+#llmBox .chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+#llmBox .chip.ok::before { background: var(--ok); }
+#llmBox .chip.bad::before { background: var(--danger); }
+.mgmt { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toolbar h2 { margin: 0 auto 0 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); }
+#tableWrap { overflow: auto; flex: 1; min-height: 0; }
+#tablePanel { display: flex; flex-direction: column; flex: 0 1 auto; max-height: 38%; min-height: 150px; }
+#tablePanel.searching { max-height: 55%; }
+#search { width: 100%; font-size: 14px; padding: 8px 12px; }
+.searchbar { display: flex; gap: 8px; align-items: center; }
+.searchbar .hint { margin: 0; white-space: nowrap; }
+td.nm .sub { color: var(--muted); font-size: 12px; word-break: normal; margin-top: 2px; }
+td.nm mark, #detail mark { background: #fde68a; color: inherit; border-radius: 2px; }
+table.lib { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.lib th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
+table.lib td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.lib tr { cursor: pointer; }
+table.lib tr:hover td { background: var(--bg); }
+table.lib tr.sel td { background: var(--active); }
+table.lib td.nm { word-break: break-all; }
+table.lib td.dt { white-space: nowrap; }
+.tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.tag.acc { color: var(--accent); border-color: var(--accent); }
+td.acts { white-space: nowrap; text-align: right; }
+td.acts button { padding: 3px 8px; font-size: 12px; }
+#detail { flex: 1; min-height: 0; overflow-y: auto; font-size: 15px; line-height: 1.55; }
+#detail h3 { font-size: 18px !important; }
+#detail li { margin: 3px 0; }
+#detail h3 { margin: 0 0 4px; font-size: 15px; }
+#detail h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+#detail ul { margin: 0; padding-left: 20px; }
+#detail .meta { color: var(--muted); font-size: 12px; }
+button.danger { color: var(--danger); border-color: var(--danger); }
+</style>
+</head>
+<body>
+<header><h1>Meeting Transcribe Lab</h1><span>mlx-whisper + pyannote · runs locally</span>
+  <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button></nav>
+</header>
+<main id="viewTranscribe">
+  <aside>
+    <div class="panel">
+      <h2>Add audio</h2>
+      <div id="drop">Drop an mp3 / wav here or click to choose<input id="file" type="file" accept="audio/*,video/mp4" hidden></div>
+      <div class="row" style="margin-top:10px">
+        <input id="recName" type="text" placeholder="Meeting name (optional)" maxlength="60" style="flex:1;min-width:0"
+          title="Saved as <name>-YYYY-MM-DD-HH-MM-SS; date and time are added automatically">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Source <select id="recSource">
+          <option value="mic" selected>Microphone</option><option value="tab">Browser tab</option></select></label>
+        <button class="rec" id="recBtn">● Record</button>
+        <label title="Transcribe while recording; speakers are labelled when you stop"><input type="checkbox" id="liveMode" checked> Live transcript</label>
+        <label title="When the recording is transcribed and speakers are labelled, summarise it with the LLM and file it under Summarised"><input type="checkbox" id="autoSum" checked> Auto-summarise</label>
+      </div>
+      <div id="recState"><span class="dot"></span><span id="recTime">0:00</span><div id="meter"><div></div></div><button id="recStop">Stop</button></div>
+      <details id="ytBox" style="margin-top:10px">
+        <summary class="hint" style="cursor:pointer;margin:0">Test with a YouTube video</summary>
+        <form class="row" id="ytForm" style="margin-top:8px">
+          <input id="ytUrl" type="url" placeholder="Paste a YouTube link" required style="flex:1;min-width:0">
+          <button id="ytBtn">Fetch</button>
+        </form>
+      </details>
+    </div>
+    <div class="panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+      <h2>Recordings</h2>
+      <div id="list"></div>
+    </div>
+  </aside>
+
+  <section class="main">
+    <div class="panel">
+      <div id="title">No recording selected</div>
+      <audio id="player" controls></audio>
+      <div class="row" style="margin-top:10px">
+        <label>Model <select id="model">
+          <option selected>medium</option></select></label>
+        <label title="Language being spoken; auto detects it per chunk">Spoken <select id="lang"><option value="">auto</option><option value="en">English</option><option value="hi">Hindi</option></select></label>
+        <label>Output <select id="task"><option value="translate" selected>English</option><option value="transcribe">As spoken</option></select></label>
+        <label>Speakers <input id="speakers" type="number" min="0" max="20" value="0" style="width:60px" title="0 = detect automatically"></label>
+        <button class="primary" id="go" disabled>Transcribe</button>
+        <label style="margin-left:auto"><input type="checkbox" id="follow" checked> Follow playback</label>
+        <button id="copyTranscript" disabled title="Copy the transcript with times and speakers">Copy transcript</button>
+      </div>
+      <div id="progress"><div></div></div>
+      <div id="status"></div>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="panel" id="transcript"><div class="empty">Transcript will appear here.</div></div>
+  </section>
+</main>
+
+<main id="viewManage" hidden>
+  <aside>
+    <div class="panel">
+      <h2>Folders</h2>
+      <div id="folders"></div>
+      <div id="llmBox">
+        <h2 style="margin-top:4px">Summariser</h2>
+        <div><span class="chip" id="llmChip">checking…</span></div>
+        <p class="hint" id="llmMsg"></p>
+        <button id="llmRun" disabled>Summarise queued</button>
+      </div>
+    </div>
+  </aside>
+  <section class="mgmt">
+    <div class="searchbar">
+      <input id="search" type="search" placeholder="Search meetings: names, summaries, action items and transcripts" autocomplete="off">
+      <span class="hint" id="searchInfo"></span>
+    </div>
+    <div class="panel" id="tablePanel">
+      <div class="toolbar">
+        <h2 id="folderTitle">Inbox</h2>
+        <span class="hint" id="selCount" style="margin:0"></span>
+        <select id="bulkMove" disabled><option value="">Move selected to…</option></select>
+        <button id="bulkDelete" class="danger" disabled>Delete</button>
+        <button id="emptyTrash" class="danger" hidden>Empty trash</button>
+      </div>
+      <div id="tableWrap" style="margin-top:10px"></div>
+    </div>
+    <div class="panel" id="detail"><div class="empty">Select a recording to see its details and summary.</div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const player = $("player");
+let current = null, lines = [], es = null, speakerColor = {};
+
+const fmt = (t) => { t = Math.max(0, t || 0); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = Math.floor(t % 60);
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0"); };
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const setStatus = (msg, err) => { $("status").textContent = msg || ""; $("status").className = err ? "err" : ""; };
+const setProgress = (f) => { $("progress").firstElementChild.style.width = (f * 100).toFixed(1) + "%"; };
+
+// ---------- clipboard ----------
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch {  // fallback for browsers that refuse the async clipboard API
+    const ta = Object.assign(document.createElement("textarea"), { value: text });
+    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  if (btn) {
+    const label = btn.textContent;
+    btn.textContent = "Copied ✓"; btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = label; btn.classList.remove("copied"); }, 1500);
+  }
+}
+const spkName = (s) => (s ? s.replace("SPEAKER_", "Speaker ") : "Speaker ?");
+function transcriptText() {
+  return (current ? current + "\n\n" : "") + lines.map((l) => `[${fmt(l.start)}] ${spkName(l.speaker)}: ${l.text}`).join("\n") + "\n";
+}
+$("copyTranscript").onclick = (e) => lines.length && copyText(transcriptText(), e.currentTarget);
+
+// ---------- recordings list ----------
+async function loadList(select) {
+  const items = await (await fetch("/api/recordings")).json();
+  $("list").innerHTML = items.length ? "" : '<div class="empty">No recordings yet</div>';
+  for (const it of items) {
+    const el = document.createElement("div");
+    el.className = "item" + (it.name === current ? " sel" : "");
+    el.innerHTML = `<div class="name">${esc(it.name)}</div><div class="meta">${it.modified.replace("T", " ")} · ${(it.size / 1e6).toFixed(1)} MB` +
+      (it.transcripts.length ? ` · ✓ ${esc(it.transcripts.join(", "))}` : "") + "</div>";
+    el.onclick = () => selectRecording(it.name);
+    $("list").appendChild(el);
+  }
+  if (select) await selectRecording(select);
+}
+
+async function selectRecording(name, { autoplay = false } = {}) {
+  if (es) { es.close(); es = null; }
+  current = name;
+  document.querySelectorAll("#list .item").forEach((el) => el.classList.toggle("sel", el.querySelector(".name").textContent === name));
+  $("title").textContent = name;
+  player.src = "/audio/" + encodeURIComponent(name);
+  $("go").disabled = false;
+  setProgress(0); setStatus(""); $("stats").innerHTML = "";
+  if (autoplay) player.play().catch(() => {});
+  await loadSaved();
+}
+
+async function loadSaved() {
+  const r = await fetch(`/api/transcript/${encodeURIComponent(current)}?model=${$("model").value}&task=${$("task").value}`);
+  if (!r.ok) { lines = []; render(); return; }
+  const data = await r.json();
+  lines = data.lines; render(); showStats(data.stats); setProgress(1);
+  setStatus(`Saved transcript (${data.stats.model}, ${data.stats.created.replace("T", " ")})`);
+}
+$("model").onchange = $("task").onchange = () => current && !es && loadSaved();
+
+// ---------- transcript ----------
+function colorFor(spk) {
+  if (!(spk in speakerColor)) speakerColor[spk] = `var(--s${Object.keys(speakerColor).length % 6})`;
+  return speakerColor[spk];
+}
+function lineEl(l) {
+  const el = document.createElement("div");
+  el.className = "line";
+  const spk = l.speaker ? `<span class="spk" style="color:${colorFor(l.speaker)}">${esc(l.speaker.replace("SPEAKER_", "Speaker "))}</span>`
+                        : '<span class="spk pending">…</span>';
+  el.innerHTML = `<span class="t">${fmt(l.start)}</span>${spk}<span>${esc(l.text)}</span>`;
+  el.onclick = () => { player.currentTime = l.start; player.play().catch(() => {}); };
+  return el;
+}
+function render() {
+  speakerColor = {};
+  $("copyTranscript").disabled = !lines.length;
+  const box = $("transcript");
+  box.innerHTML = lines.length ? "" : '<div class="empty">Transcript will appear here.</div>';
+  lines.forEach((l) => box.appendChild(lineEl(l)));
+}
+function showStats(s) {
+  const cell = (v, label) => `<div><b>${v}</b><span>${label}</span></div>`;
+  $("stats").innerHTML = [
+    cell(fmt(s.duration), "audio"),
+    s.transcribe_s != null ? cell(s.transcribe_s.toFixed(1) + "s", "transcribe") : "",
+    s.diarize_s != null ? cell(s.diarize_s.toFixed(1) + "s", "speakers") : "",
+    s.rtf != null ? cell(s.rtf.toFixed(2) + "×", "of real time") : "",
+    s.speakers != null ? cell(s.speakers, "speakers found") : "",
+    s.max_lag_s != null ? cell(s.max_lag_s.toFixed(1) + "s", "max live delay") : "",
+    s.languages ? cell(esc(s.languages.join(", ")), "language") : "",
+  ].join("");
+}
+
+player.ontimeupdate = () => {
+  const t = player.currentTime, els = $("transcript").children;
+  lines.forEach((l, i) => {
+    const on = t >= l.start && t < (lines[i + 1]?.start ?? l.end + 1);
+    if (els[i] && on !== els[i].classList.contains("now")) {
+      els[i].classList.toggle("now", on);
+      if (on && $("follow").checked) els[i].scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  });
+};
+
+// ---------- transcription stream ----------
+function transcribe({ auto = false } = {}) {
+  if (!current) return;
+  if (es) es.close();
+  lines = []; render(); $("stats").innerHTML = ""; setProgress(0);
+  $("go").disabled = true;
+  const t0 = performance.now();
+  const q = new URLSearchParams({ model: $("model").value, lang: $("lang").value, speakers: $("speakers").value || 0, task: $("task").value, auto: auto ? 1 : 0 });
+  es = new EventSource(`/api/transcribe/${encodeURIComponent(current)}?${q}`);
+  let duration = 0;
+  es.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === "queued") setStatus("Loading audio and model…");
+    else if (ev.type === "start") { duration = ev.duration; setStatus(`Transcribing ${fmt(duration)} of audio in ${ev.chunks} chunks…`); }
+    else if (ev.type === "segment") {
+      lines.push(ev);
+      const box = $("transcript");
+      if (lines.length === 1) { box.innerHTML = ""; $("copyTranscript").disabled = false; }
+      box.appendChild(lineEl(ev));
+    } else if (ev.type === "progress") {
+      setProgress(ev.audio_pos / duration);
+      setStatus(`Chunk ${ev.done}/${ev.total} · ${fmt(ev.audio_pos)} of ${fmt(duration)} processed in ${ev.elapsed.toFixed(1)}s ` +
+        `(${(ev.elapsed / ev.audio_pos).toFixed(2)}× real time)`);
+    } else if (ev.type === "status") setStatus(ev.message);
+    else if (ev.type === "done") {
+      lines = ev.lines; render(); showStats(ev.stats); setProgress(1);
+      setStatus(`Done in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+      loadList();
+      if (!auto) finish();  // with auto-summary the stream stays open for the summary result
+    } else if (ev.type === "summary_done") { setStatus(summaryMsg(ev)); finish(); }
+    else if (ev.type === "summary_error") { setStatus(ev.message, true); finish(); }
+    else if (ev.type === "error") { setStatus(ev.message, true); finish(); }
+  };
+  es.onerror = () => { setStatus("Lost connection to the server", true); finish(); };
+}
+function finish() { if (es) { es.close(); es = null; } $("go").disabled = !current; }
+$("go").onclick = () => transcribe();
+const summaryMsg = (ev) => `Summarised in ${ev.seconds}s: “${ev.title || ev.name}” · ${ev.action_items} action item(s). ` +
+  "Filed under Summarised — see the Manage tab.";
+
+// ---------- upload ----------
+async function upload(file, name) {
+  const fd = new FormData();
+  fd.append("file", file, name || file.name);
+  setStatus("Uploading…");
+  const r = await fetch("/api/upload", { method: "POST", body: fd });
+  if (!r.ok) { setStatus("Upload failed: " + (await r.json()).detail, true); return null; }
+  return (await r.json()).name;
+}
+async function uploadAndRun(file) {
+  const name = await upload(file);
+  if (!name) return;
+  await loadList();
+  await selectRecording(name, { autoplay: true });
+  transcribe();
+}
+$("ytForm").onsubmit = async (e) => {
+  e.preventDefault();
+  $("ytBtn").disabled = true;
+  setStatus("Downloading audio from YouTube…");
+  try {
+    const r = await fetch("/api/youtube", { method: "POST", headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ url: $("ytUrl").value.trim() }) });
+    const data = await r.json();
+    if (!r.ok) return setStatus(data.detail, true);
+    $("ytUrl").value = "";
+    await loadList();
+    await selectRecording(data.name, { autoplay: true });
+    transcribe();
+  } finally { $("ytBtn").disabled = false; }
+};
+$("drop").onclick = () => $("file").click();
+$("file").onchange = (e) => e.target.files[0] && uploadAndRun(e.target.files[0]);
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => { e.preventDefault(); $("drop").classList.remove("over"); e.dataTransfer.files[0] && uploadAndRun(e.dataTransfer.files[0]); };
+
+// ---------- recording ----------
+let rec = null;  // active recording: anything with a stop() method
+
+async function getStream(fromTab) {
+  let stream;
+  try {
+    if (fromTab) {
+      if (!navigator.mediaDevices?.getDisplayMedia || !/Chrome|Edg/.test(navigator.userAgent)) {
+        setStatus("Tab recording needs Chrome or Edge. Open this page there, or use Microphone.", true);
+        return null;
+      }
+      // Chrome only shares tab audio alongside video; the video track is ignored.
+      // These hints open the dialog on the "Chrome Tab" pane with tab audio ticked, and hide this page itself.
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: "browser" },
+        audio: { suppressLocalAudioPlayback: false },
+        selfBrowserSurface: "exclude", preferCurrentTab: false, surfaceSwitching: "include", systemAudio: "include",
+      });
+      if (!stream.getAudioTracks().length) {
+        stream.getTracks().forEach((t) => t.stop());
+        setStatus("No audio was shared. In the dialog choose the “Chrome Tab” pane (not Window or Entire Screen — " +
+          "macOS can’t share their audio), pick the YouTube tab and keep “Also share tab audio” on.", true);
+        return null;
+      }
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    }
+  } catch (e) { setStatus("Recording not started: " + e.message, true); return null; }
+  return stream;
+}
+
+// Level meter + elapsed timer on an existing AudioContext; returns a function that stops it.
+function startMeter(ctx, source) {
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  source.connect(analyser);
+  const buf = new Uint8Array(analyser.fftSize);
+  const started = Date.now();
+  const tick = setInterval(() => {
+    analyser.getByteTimeDomainData(buf);
+    let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+    $("meter").firstElementChild.style.width = Math.min(100, peak / 128 * 140) + "%";
+    $("recTime").textContent = fmt((Date.now() - started) / 1000);
+  }, 100);
+  $("recState").classList.add("on"); $("recBtn").disabled = $("recSource").disabled = $("liveMode").disabled = $("recName").disabled = $("autoSum").disabled = true;
+  return () => {
+    clearInterval(tick);
+    $("recState").classList.remove("on"); $("recBtn").disabled = $("recSource").disabled = $("liveMode").disabled = $("recName").disabled = $("autoSum").disabled = false;
+  };
+}
+
+// Recording names: "<meeting name>-YYYY-MM-DD-HH-MM-SS" in local time; without a name, the old rec-<source>- form.
+function recPrefix(fallback) {
+  return $("recName").value.trim().replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || fallback;
+}
+function localStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
+
+async function startRecording(fromTab) {
+  const stream = await getStream(fromTab);
+  if (!stream) return;
+  const audioOnly = new MediaStream(stream.getAudioTracks());
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  const mr = new MediaRecorder(audioOnly, mime ? { mimeType: mime } : {});
+  const chunks = [];
+  mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+
+  const ctx = new AudioContext();
+  const stopMeter = startMeter(ctx, ctx.createMediaStreamSource(audioOnly));
+
+  mr.onstop = async () => {
+    stopMeter(); ctx.close(); stream.getTracks().forEach((t) => t.stop());
+    rec = null;
+    const ext = (mr.mimeType || mime).includes("mp4") ? "m4a" : "webm";
+    const name = await upload(new Blob(chunks, { type: mr.mimeType }), `${recPrefix(`rec-${fromTab ? "tab" : "mic"}`)}-${localStamp()}.${ext}`);
+    if (!name) return;
+    await loadList(); await selectRecording(name);
+    if ($("autoSum").checked) transcribe({ auto: true });  // workflow: transcribe + speakers → summary → Summarised
+    else setStatus("Recording saved. Press play to review, or Transcribe.");
+  };
+  // Stop if the user ends sharing from Chrome's own "Stop sharing" bar.
+  stream.getAudioTracks()[0].onended = () => mr.state === "recording" && mr.stop();
+
+  mr.start(1000);
+  rec = mr;
+  setStatus(fromTab ? "Recording tab audio — play the video now." : "Recording microphone…");
+}
+// ---------- live transcription ----------
+// Runs on the audio thread: mixes to mono and posts ~250 ms blocks of 16-bit PCM to the page.
+const PCM_WORKLET = `
+class PcmCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Int16Array(4000); this.n = 0;
+    this.port.onmessage = () => this.flush();  // any message = send what we have
+  }
+  flush() {
+    if (this.n) this.port.postMessage(this.buf.slice(0, this.n).buffer);
+    this.n = 0;
+  }
+  process(inputs) {
+    const chans = inputs[0];
+    if (chans.length) {
+      for (let i = 0; i < chans[0].length; i++) {
+        let v = 0; for (const c of chans) v += c[i];
+        v = Math.max(-1, Math.min(1, v / chans.length));
+        this.buf[this.n++] = v * 32767;
+        if (this.n === this.buf.length) this.flush();
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("pcm-capture", PcmCapture);`;
+
+async function startLive(fromTab) {
+  const stream = await getStream(fromTab);
+  if (!stream) return;
+  if (es) { es.close(); es = null; }
+  current = null; lines = []; render(); $("stats").innerHTML = ""; setProgress(0);
+  document.querySelectorAll("#list .item").forEach((el) => el.classList.remove("sel"));
+  $("title").textContent = "Live session"; player.removeAttribute("src"); $("go").disabled = true;
+  setStatus("Loading model…");
+
+  const q = new URLSearchParams({ model: $("model").value, lang: $("lang").value, task: $("task").value,
+                                  speakers: $("speakers").value || 0, source: fromTab ? "tab" : "mic",
+                                  prefix: recPrefix(""), auto: $("autoSum").checked ? 1 : 0 });
+  const auto = $("autoSum").checked;
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/live?${q}`);
+  const queued = [];
+  ws.onopen = () => { queued.forEach((b) => ws.send(b)); queued.length = 0; };
+
+  // A 16 kHz context makes Chrome resample for us, so the server gets Whisper's native rate.
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([PCM_WORKLET], { type: "text/javascript" })));
+  const source = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+  const node = new AudioWorkletNode(ctx, "pcm-capture");
+  node.port.onmessage = (e) => (ws.readyState === WebSocket.OPEN ? ws.send(e.data) : queued.push(e.data));
+  source.connect(node);
+  node.connect(ctx.destination);  // outputs silence; keeps the node running
+  const stopMeter = startMeter(ctx, source);
+
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    node.port.postMessage("flush");
+    setTimeout(() => {  // let the flushed block reach the socket before "stop"
+      stopMeter(); source.disconnect(); ctx.close(); stream.getTracks().forEach((t) => t.stop());
+      if (ws.readyState === WebSocket.OPEN) ws.send("stop");
+      rec = null;
+    }, 150);
+  };
+  rec = { stop };
+  stream.getAudioTracks()[0].onended = stop;  // Chrome's own "Stop sharing" bar
+
+  const box = $("transcript");
+  let finalDuration = 0;
+  ws.onmessage = async (m) => {
+    const ev = JSON.parse(m.data);
+    // After Stop the server re-transcribes the saved recording at full quality; the live lines stay
+    // on screen until the improved, speaker-labelled transcript replaces them.
+    if (ev.final && ev.type === "start") { finalDuration = ev.duration; setProgress(0); }
+    else if (ev.final && ev.type === "progress") {
+      setProgress(ev.audio_pos / finalDuration);
+      setStatus(`Improving transcript: ${fmt(ev.audio_pos)} of ${fmt(finalDuration)}…`);
+    } else if (ev.final && ev.type === "segment") { /* shown all at once when done */ }
+    else if (ev.type === "final_start") setStatus("Recording saved. Improving transcript…");
+    else if (ev.type === "ready") setStatus(fromTab ? "Listening to the tab — play the video now." : "Listening…");
+    else if (ev.type === "segment") {
+      if (!lines.length) { box.innerHTML = ""; $("copyTranscript").disabled = false; }
+      lines.push(ev);
+      box.appendChild(lineEl(ev));
+      if ($("follow").checked) box.scrollTop = box.scrollHeight;
+    } else if (ev.type === "progress" && !stopping) {
+      setStatus(`Recording ${fmt(ev.recorded)} · transcribed up to ${fmt(ev.transcribed)} ` +
+                `(${Math.max(0, ev.recorded - ev.transcribed).toFixed(1)}s behind)`);
+    } else if (ev.type === "status") setStatus(ev.message);
+    else if (ev.type === "done") {
+      await loadList();
+      await selectRecording(ev.recording);
+      setStatus(auto ? `Saved as ${ev.recording}. Transcript done. Summarising…`
+                     : `Live session saved as ${ev.recording}. Transcript improved and speakers labelled.`);
+    } else if (ev.type === "summary_done") setStatus(summaryMsg(ev));
+    else if (ev.type === "summary_error") setStatus(ev.message, true);
+    else if (ev.type === "error") { setStatus(ev.message, true); stop(); }
+  };
+  ws.onclose = () => { if (!stopping) { setStatus("Lost connection to the server", true); stop(); } };
+}
+
+$("recBtn").onclick = () => ($("liveMode").checked ? startLive : startRecording)($("recSource").value === "tab");
+$("recStop").onclick = () => rec && rec.stop();
+
+// ---------- tabs ----------
+document.querySelectorAll("nav.tabs button").forEach((b) => b.onclick = () => showView(b.dataset.view));
+function showView(id) {
+  document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === id));
+  document.querySelectorAll("main").forEach((m) => (m.hidden = m.id !== id));
+  if (id === "viewManage") { loadLibrary(); loadLlm(); } else loadList();
+}
+
+// ---------- manage ----------
+let lib = { folders: [], items: [], busy: [] }, folder = "inbox", picked = new Set(), focus = null;
+let query = "", found = null;  // found: {name: {hits, count}} while a search is active
+const FOLDER_HINT = {
+  to_summarise: "Transcripts here are copied to llm/inbox/ for the summariser.",
+  trash: "Deleted recordings. “Empty trash” removes their audio, transcripts and summaries for good.",
+};
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" },
+                                                          body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+async function act(fn) {
+  try { await fn(); } catch (e) { alert(e.message); }
+  await loadLibrary(); loadLlm();
+}
+
+async function loadLibrary() {
+  lib = await api("/api/library");
+  if (query) found = await api(`/api/library/search?q=${encodeURIComponent(query)}`).catch(() => found);  // stay fresh after rename/move
+  const names = new Set(lib.items.map((i) => i.name));
+  picked = new Set([...picked].filter((n) => names.has(n) && (found ? found[n] : lib.items.find((i) => i.name === n).folder === folder)));
+  if (focus && !names.has(focus)) focus = null;
+  $("folders").innerHTML = "";
+  for (const f of lib.folders) {
+    const el = document.createElement("div");
+    el.className = "f" + (f.id === folder && !found ? " sel" : "");
+    el.innerHTML = `<span>${esc(f.label)}</span><span>${f.count}</span>`;
+    el.onclick = () => { folder = f.id; picked.clear(); focus = null; clearSearch(); loadLibrary(); };
+    $("folders").appendChild(el);
+  }
+  $("bulkMove").innerHTML = '<option value="">Move selected to…</option>' +
+    lib.folders.filter((f) => (found || f.id !== folder) && f.id !== "trash").map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("");
+  $("tablePanel").classList.toggle("searching", !!found);
+  $("folderTitle").textContent = found ? "Search results" : lib.folders.find((f) => f.id === folder).label;
+  $("emptyTrash").hidden = found || folder !== "trash";
+  $("bulkDelete").textContent = !found && folder === "trash" ? "Delete permanently" : "Delete";
+  renderTable(); renderSel(); renderDetail();
+}
+
+function renderTable() {
+  const rows = found ? lib.items.filter((i) => found[i.name]) : lib.items.filter((i) => i.folder === folder);
+  if (found) $("searchInfo").textContent = `${rows.length} meeting${rows.length === 1 ? "" : "s"} found`;
+  if (!rows.length && found) { $("tableWrap").innerHTML = '<div class="empty">No meetings match.</div>'; return; }
+  if (!rows.length) {
+    $("tableWrap").innerHTML = `<div class="empty">Nothing here.${FOLDER_HINT[folder] ? "<br>" + FOLDER_HINT[folder] : ""}</div>`;
+    return;
+  }
+  const otherFolders = (cur) => lib.folders.filter((f) => f.id !== cur && f.id !== "trash")
+    .map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("");
+  $("tableWrap").innerHTML = `<table class="lib"><thead><tr>
+      <th><input type="checkbox" id="pickAll"></th><th>Recording</th><th>Recorded</th><th>Length</th>
+      <th>Speakers</th>${found ? "<th>Folder</th>" : ""}<th>Status</th><th></th></tr></thead><tbody></tbody></table>`;
+  const body = $("tableWrap").querySelector("tbody");
+  for (const it of rows) {
+    const tr = document.createElement("tr");
+    tr.className = it.name === focus ? "sel" : "";
+    const busy = lib.busy.includes(it.name);
+    const status = busy ? '<span class="tag acc">transcribing…</span>'
+      : it.summary ? '<span class="tag ok">summarised</span>'
+      : it.queued ? '<span class="tag acc">queued for LLM</span>'
+      : it.transcripts.length ? '<span class="tag">transcribed</span>' : '<span class="tag">no transcript</span>';
+    tr.innerHTML = `<td><input type="checkbox" ${picked.has(it.name) ? "checked" : ""}></td>
+      <td class="nm">${hl(it.name)}${it.title ? `<div class="sub">${hl(it.title)}</div>` : ""}${found ? hitsHtml(found[it.name]) : ""}</td>
+      <td class="dt">${it.modified.replace("T", " ")}</td>
+      <td>${it.duration ? fmt(it.duration) : "–"}</td><td>${it.speakers ?? "–"}</td>
+      ${found ? `<td>${esc(lib.folders.find((f) => f.id === it.folder)?.label || it.folder)}</td>` : ""}<td>${status}</td>
+      <td class="acts">` + (it.folder === "trash"
+        ? `<button data-a="restore">Restore</button>`
+        : `<button data-a="open">Open</button> <button data-a="rename">Rename</button>
+           <select data-a="move"><option value="">Move…</option>${otherFolders(it.folder)}</select>
+           <button data-a="delete" class="danger">Delete</button>`) + "</td>";
+    tr.onclick = (e) => {
+      if (e.target.closest("button, select, input")) return;
+      focus = it.name; renderTable(); renderDetail();
+    };
+    tr.querySelector("input").onchange = (e) => { e.target.checked ? picked.add(it.name) : picked.delete(it.name); renderSel(); };
+    tr.querySelectorAll("[data-a]").forEach((el) => {
+      const a = el.dataset.a;
+      if (a === "move") el.onchange = () => el.value && act(() => api("/api/library/move", { names: [it.name], folder: el.value }));
+      else el.onclick = () => rowAction(a, it);
+    });
+    body.appendChild(tr);
+  }
+  $("pickAll").checked = rows.length > 0 && rows.every((r) => picked.has(r.name));
+  $("pickAll").onchange = (e) => { rows.forEach((r) => (e.target.checked ? picked.add(r.name) : picked.delete(r.name))); renderTable(); renderSel(); };
+}
+
+function rowAction(a, it) {
+  if (a === "open") { showView("viewTranscribe"); loadList(it.name); }
+  else if (a === "rename") {
+    const stem = it.name.replace(/\.[^.]+$/, "");
+    const v = prompt("New name (the file extension is kept):", stem);
+    if (v && v.trim() && v.trim() !== stem)
+      act(async () => { const r = await api("/api/library/rename", { name: it.name, new_name: v.trim() }); if (focus === it.name) focus = r.name; });
+  } else if (a === "delete") act(() => api("/api/library/delete", { names: [it.name] }));
+  else if (a === "restore") act(() => api("/api/library/move", { names: [it.name], folder: "inbox" }));
+}
+
+function renderSel() {
+  const n = picked.size;
+  $("selCount").textContent = n ? `${n} selected` : "";
+  $("bulkMove").disabled = $("bulkDelete").disabled = !n;
+}
+$("bulkMove").onchange = () => {
+  const to = $("bulkMove").value;
+  if (to) act(() => api("/api/library/move", { names: [...picked], folder: to }));
+};
+$("bulkDelete").onclick = () => {
+  const names = [...picked], permanent = !found && folder === "trash";
+  if (permanent && !confirm(`Permanently delete ${names.length} recording(s) with their transcripts and summaries? This can’t be undone.`)) return;
+  act(() => api("/api/library/delete", { names, permanent }));
+};
+$("emptyTrash").onclick = () => {
+  const n = lib.items.filter((i) => i.folder === "trash").length;
+  if (n && confirm(`Permanently delete all ${n} recording(s) in Trash with their transcripts and summaries? This can’t be undone.`))
+    act(() => api("/api/library/empty-trash", {}));
+};
+
+// ---------- search ----------
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function hl(text) {  // escape and highlight the search words (split the raw text, so entities stay intact)
+  const words = found ? query.split(/\s+/).filter(Boolean).map(reEsc) : [];
+  if (!words.length) return esc(String(text));
+  return String(text).split(new RegExp(`(${words.join("|")})`, "gi"))
+    .map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join("");
+}
+function hitsHtml(r) {
+  if (!r) return "";
+  const shown = r.hits.filter((h) => h.where !== "name" && h.where !== "title").slice(0, 1);
+  const more = r.count - r.hits.filter((h) => h.where === "name" || h.where === "title").length - shown.length;
+  return shown.map((h) => `<div class="sub">${h.where}${h.start != null ? " " + fmt(h.start) : ""}: “${hl(h.text.length > 160 ? h.text.slice(0, 160) + "…" : h.text)}”</div>`).join("")
+    + (more > 0 ? `<div class="sub">+${more} more match${more === 1 ? "" : "es"}</div>` : "");
+}
+function clearSearch() { query = ""; found = null; $("search").value = ""; $("searchInfo").textContent = ""; }
+let searchTimer = null, searchSeq = 0;
+$("search").oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    const q = $("search").value.trim(), seq = ++searchSeq;
+    if (!q) { clearSearch(); return loadLibrary(); }
+    const r = await api(`/api/library/search?q=${encodeURIComponent(q)}`).catch(() => null);
+    if (seq !== searchSeq || !r) return;
+    query = q; found = r; picked.clear();
+    await loadLibrary();
+  }, 250);
+};
+$("search").onkeydown = (e) => { if (e.key === "Escape") { clearSearch(); loadLibrary(); } };
+
+async function renderDetail() {
+  const it = lib.items.find((i) => i.name === focus);
+  if (!it) { $("detail").innerHTML = '<div class="empty">Select a recording to see its details and summary.</div>'; return; }
+  const meta = [it.modified.replace("T", " "), it.duration ? fmt(it.duration) : null, it.speakers != null ? `${it.speakers} speakers` : null,
+                `${(it.size / 1e6).toFixed(1)} MB`, it.transcripts.length ? `transcripts: ${it.transcripts.join(", ")}` : "no transcript"]
+    .filter(Boolean).join(" · ");
+  let body = it.queued ? "<p>Queued for the summariser (llm/inbox/).</p>"
+    : it.summary ? "<p class='meta'>Loading summary…</p>"
+    : "<p class='meta'>No summary yet. Move it to “To summarise” to queue it for the LLM.</p>";
+  $("detail").innerHTML = `<h3>${esc(it.name)}</h3><div class="meta">${esc(meta)}</div>${body}`;
+  if (!it.summary) return;
+  try {
+    const { data, markdown } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
+    if (focus !== it.name) return;
+    const list = (xs) => xs?.length ? `<ul>${xs.map((x) => `<li>${hl(String(x))}</li>`).join("")}</ul>` : "<p class='meta'>None.</p>";
+    $("detail").innerHTML = `<span class="dtools"><button id="copySummary" title="Copy the summary as Markdown">Copy summary</button></span>` +
+      `<h3>${hl(data?.title || it.name)}</h3><div class="meta">${esc(it.name)} · ${esc(meta)}` +
+      (data?._meta ? ` · summarised by ${esc(data._meta.model)} in ${data._meta.seconds}s` : "") + "</div>" +
+      (data ? `<h4>Summary</h4>${list(data.summary)}<h4>Decisions</h4>${list(data.decisions)}
+               <h4>Action items</h4>${list((data.action_items || []).map((a) => `${a.owner || "unassigned"}: ${a.task}${a.due ? ` (due ${a.due})` : ""}`))}
+               <h4>Open questions</h4>${list(data.open_questions)}`
+            : `<pre style="white-space:pre-wrap">${esc(markdown)}</pre>`);
+    $("copySummary").onclick = (e) => copyText(markdown, e.currentTarget);
+  } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
+}
+
+async function loadLlm() {
+  const s = await api("/api/llm/status").catch((e) => ({ ok: false, message: e.message, queued: [] }));
+  $("llmChip").className = "chip " + (s.ok ? "ok" : "bad");
+  $("llmChip").textContent = s.ok ? `${s.model} ready` : "LLM not connected";
+  $("llmMsg").textContent = s.ok ? `${s.queued.length} transcript(s) queued.` :
+    `${s.message}. Queued transcripts wait in llm/inbox/ until it is available.`;
+  $("llmRun").textContent = `Summarise queued (${s.queued.length})`;
+  $("llmRun").disabled = !s.ok || !s.queued.length;
+  $("llmRun").onclick = () => act(async () => {
+    $("llmRun").disabled = true; $("llmRun").textContent = "Summarising…";
+    const { results } = await api("/api/llm/summarise", { names: s.queued });
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) alert(failed.map((r) => `${r.name}: ${r.error}`).join("\n"));
+  });
+}
+
+loadList();
+</script>
+</body>
+</html>

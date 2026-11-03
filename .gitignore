@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local data; only the bundled samples (sample-*) are tracked.
+recordings/*
+!recordings/sample-*
+out/*
+!out/ui/
+out/ui/*
+!out/ui/sample-*
+llm/
+library.json
+
+# macOS / local settings
+.DS_Store
+llm.json
+# Local word list for scripts/repo_guard.py
+.guard-terms
