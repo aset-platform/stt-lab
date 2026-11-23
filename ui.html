@@ -789,7 +789,8 @@ function renderTable() {
     const tr = document.createElement("tr");
     tr.className = it.name === focus ? "sel" : "";
     const busy = lib.busy.includes(it.name);
-    const status = busy ? '<span class="tag acc">transcribing…</span>'
+    // busy covers both jobs; a transcript already handed to the LLM (queued) means it is being summarised
+    const status = busy ? `<span class="tag acc">${it.queued ? "summarising…" : "transcribing…"}</span>`
       : it.summary ? '<span class="tag ok">summarised</span>'
       : it.queued ? '<span class="tag acc">queued for LLM</span>'
       : it.transcripts.length ? '<span class="tag">transcribed</span>' : '<span class="tag">no transcript</span>';
