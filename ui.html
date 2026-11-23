@@ -22,6 +22,8 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -app
 header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
 header h1 { font-size: 16px; margin: 0; }
 header span { color: var(--muted); font-size: 12px; }
+header .wstop { margin-left: auto; align-self: center; color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+header .wstop select { font-size: 13px; padding: 3px 8px; }
 main { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; height: calc(100vh - 53px); }
 @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
@@ -148,11 +150,37 @@ table.models button { padding: 3px 9px; font-size: 12px; }
 .cmp .stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; margin: 6px 0; }
 .cmp .stats span:nth-child(odd) { color: var(--muted); }
 button.danger { color: var(--danger); border-color: var(--danger); }
+.lbl { margin: 12px 0 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.lbl.review { border-color: var(--accent); }
+.lbl .lhead { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lbl .lhead b { margin-right: auto; }
+.lbl .lrow { display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: start; margin-top: 8px; }
+.lbl .lrow > span:first-child { color: var(--muted); font-size: 12px; padding-top: 3px; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.chip-l { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--active); border: 1px solid var(--border); white-space: nowrap; }
+.chip-l button { border: none; background: none; padding: 0 0 0 4px; color: var(--muted); font-size: 12px; }
+.chips input { font-size: 12px; padding: 2px 6px; width: 140px; }
+.lnew { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.lnew .nrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.lnew .nrow b { min-width: 120px; font-weight: 500; }
+.lbl select, .lnew select { font-size: 12px; padding: 2px 6px; }
+.chip-l [data-ed] { cursor: text; }
+.lbl .ltypein, .lnew [data-as] { font-size: 12px; padding: 2px 6px; margin-left: 6px; width: 200px; }
+.lacts { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+table.reg { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.reg th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 5px 6px; border-bottom: 1px solid var(--border); }
+table.reg td { padding: 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.reg tr.arch td { color: var(--muted); }
+table.reg td:last-child { text-align: right; white-space: nowrap; }
+table.reg button { padding: 2px 8px; font-size: 12px; }
+table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
+
 </style>
 </head>
 <body>
 <header><h1>Meeting Transcribe Lab</h1><span>mlx-whisper + pyannote · runs locally</span>
   <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button><button data-view="viewSettings">Settings</button></nav>
+  <label class="wstop" title="Every page shows this workspace's recordings; new recordings join it">Workspace <select id="wsTop"></select></label>
 </header>
 <main id="viewTranscribe">
   <aside>
@@ -229,6 +257,7 @@ button.danger { color: var(--danger); border-color: var(--danger); }
         <h2 id="folderTitle">Inbox</h2>
         <span class="hint" id="selCount" style="margin:0"></span>
         <select id="bulkMove" disabled><option value="">Move selected to…</option></select>
+        <select id="bulkWs" disabled><option value="">Move to workspace…</option></select>
         <button id="bulkDelete" class="danger" disabled>Delete</button>
         <button id="emptyTrash" class="danger" hidden>Empty trash</button>
       </div>
@@ -245,6 +274,7 @@ button.danger { color: var(--danger); border-color: var(--danger); }
       <div id="cfgNav">
         <div class="f sel" data-pane="cfgTranscribe">Transcription</div>
         <div class="f" data-pane="cfgSummariser">Summariser</div>
+        <div class="f" data-pane="cfgLabels">Labels</div>
       </div>
     </div>
   </aside>
@@ -268,6 +298,23 @@ button.danger { color: var(--danger); border-color: var(--danger); }
         <select data-set="transcription.task"><option value="translate">English</option><option value="transcribe">As spoken</option></select></div>
       <div class="setting"><div class="what"><b>Speakers</b><p class="hint">0 = detect automatically</p></div>
         <input type="number" min="0" max="20" style="width:70px" data-set="transcription.speakers"></div>
+    </div>
+  </section>
+
+  <section class="settings" id="cfgLabels" hidden>
+    <div class="panel">
+      <h2>Workspace</h2>
+      <p class="hint">One workspace per firm: its own meeting types, clients, projects, people and topics. New meetings are
+        labelled in the active one; older meetings keep the workspace they were confirmed in.</p>
+      <div class="setting"><div class="what"><b>Active workspace</b></div><select id="wsActive"></select></div>
+      <div class="setting"><div class="what"><b>New workspace</b><p class="hint">Starts empty; it fills up as you confirm labels.</p></div>
+        <span class="row"><input type="text" id="wsNewName" placeholder="Firm name" style="width:180px"><button id="wsNew">Create</button></span></div>
+    </div>
+    <div class="panel">
+      <h2>Registry <select id="wsEdit" style="margin-left:8px;text-transform:none;letter-spacing:0"></select></h2>
+      <p class="hint">“Heard as” lists the spellings speech recognition produces for a name; they are mapped to the name.
+        Archive what is no longer current (it stays on old meetings). Confirming labels in Manage adds to this list.</p>
+      <div id="regBody"><p class="meta">Loading…</p></div>
     </div>
   </section>
 
@@ -714,6 +761,9 @@ async function loadLibrary() {
   }
   $("bulkMove").innerHTML = '<option value="">Move selected to…</option>' +
     lib.folders.filter((f) => (found || f.id !== folder) && f.id !== "trash").map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("");
+  $("bulkWs").innerHTML = '<option value="">Move to workspace…</option>' +
+    workspaces.filter((w) => w.id !== cfg?.labels?.workspace).map((w) => `<option value="${esc(w.id)}">${esc(w.name)}</option>`).join("") +
+    (cfg?.labels?.workspace ? '<option value="-">— no workspace</option>' : "");
   $("tablePanel").classList.toggle("searching", !!found);
   $("folderTitle").textContent = found ? "Search results" : lib.folders.find((f) => f.id === folder).label;
   $("emptyTrash").hidden = found || folder !== "trash";
@@ -743,11 +793,12 @@ function renderTable() {
       : it.summary ? '<span class="tag ok">summarised</span>'
       : it.queued ? '<span class="tag acc">queued for LLM</span>'
       : it.transcripts.length ? '<span class="tag">transcribed</span>' : '<span class="tag">no transcript</span>';
+    const lbl = it.labels === "suggested" ? ' <span class="tag acc" title="Suggested labels wait for your review">labels to review</span>' : "";
     tr.innerHTML = `<td><input type="checkbox" ${picked.has(it.name) ? "checked" : ""}></td>
       <td class="nm">${hl(it.name)}${it.title ? `<div class="sub">${hl(it.title)}</div>` : ""}${found ? hitsHtml(found[it.name]) : ""}</td>
       <td class="dt">${it.modified.replace("T", " ")}</td>
       <td>${it.duration ? fmt(it.duration) : "–"}</td><td>${it.speakers ?? "–"}</td>
-      ${found ? `<td>${esc(lib.folders.find((f) => f.id === it.folder)?.label || it.folder)}</td>` : ""}<td>${status}</td>
+      ${found ? `<td>${esc(lib.folders.find((f) => f.id === it.folder)?.label || it.folder)}</td>` : ""}<td>${status}${lbl}</td>
       <td class="acts">` + (it.folder === "trash"
         ? `<button data-a="restore">Restore</button>`
         : `<button data-a="open">Open</button> <button data-a="rename">Rename</button>
@@ -783,8 +834,17 @@ function rowAction(a, it) {
 function renderSel() {
   const n = picked.size;
   $("selCount").textContent = n ? `${n} selected` : "";
-  $("bulkMove").disabled = $("bulkDelete").disabled = !n;
+  $("bulkMove").disabled = $("bulkDelete").disabled = $("bulkWs").disabled = !n;
 }
+$("bulkWs").onchange = () => {
+  const to = $("bulkWs").value;
+  if (!to) return;
+  const ws = to === "-" ? "" : to;
+  const name = ws ? workspaces.find((w) => w.id === ws)?.name : "no workspace";
+  if (!confirm(`Move ${picked.size} recording(s) to ${name}? They will leave this list. Labels already confirmed are kept; re-suggest them to use ${name}'s names.`))
+    return ($("bulkWs").value = "");
+  act(() => api("/api/library/workspace", { names: [...picked], workspace: ws }));
+};
 $("bulkMove").onchange = () => {
   const to = $("bulkMove").value;
   if (to) act(() => api("/api/library/move", { names: [...picked], folder: to }));
@@ -840,7 +900,7 @@ async function renderDetail() {
     : it.summary ? "<p class='meta'>Loading summary…</p>"
     : "<p class='meta'>No summary yet. Move it to “To summarise” to queue it for the LLM.</p>";
   $("detail").innerHTML = `<h3>${esc(it.name)}</h3><div class="meta">${esc(meta)}</div>${body}`;
-  if (!it.summary) return renderCompare(it);
+  if (!it.summary) { if (it.queued) addLabelBox(it); return renderCompare(it); }
   try {
     const { data, markdown } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
     if (focus !== it.name) return;
@@ -854,6 +914,7 @@ async function renderDetail() {
             : `<pre style="white-space:pre-wrap">${esc(markdown)}</pre>`);
     $("copySummary").onclick = (e) => copyText(markdown, e.currentTarget);
   } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
+  addLabelBox(it);
   renderCompare(it);
 }
 
@@ -971,6 +1032,7 @@ async function loadSettings() {
     const [section, key] = el.dataset.set.split(".");
     if (el.type === "checkbox") el.checked = cfg[section][key]; else el.value = cfg[section][key];
   });
+  if (cfgPane === "cfgLabels") return loadLabelSettings();
   if (cfgPane !== "cfgSummariser") return;
   $("llmServer").textContent = `LLM server: ${cfg.llm.base_url}. The model in use writes every summary, manual and auto-summarise.`;
   const box = $("modelTable");
@@ -1022,8 +1084,230 @@ async function loadSettings() {
   });
 }
 
+// ---------- labels (Manage detail) ----------
+const LFIELDS = [["client", "clients", "Clients"], ["project", "projects", "Projects"], ["person", "people", "People"], ["topic", "topics", "Topics"]];
+const regCache = {};
+async function registry(ws) {
+  if (!ws) return { types: ["client call", "internal standup", "1:1", "demo", "HR/admin", "interview", "other"], entities: [] };
+  return regCache[ws] ||= await api(`/api/registry/${ws}`);
+}
+const namesOf = (reg, kind) => reg.entities.filter((e) => e.kind === kind).map((e) => e.name).sort((a, b) => a.localeCompare(b));
+
+let lblEdit = null;  // {name, state} while the labels of a meeting are being reviewed/edited
+function addLabelBox(it) {
+  $("detail").querySelector(".lbl")?.remove();
+  $("detail").querySelector(".meta")?.insertAdjacentHTML("afterend", '<div class="lbl" id="labelBox"><span class="meta">Loading labels…</span></div>');
+  renderLabels(it);
+}
+async function renderLabels(it, fresh = true) {
+  const box = $("labelBox");
+  if (!box) return;
+  let info;
+  try { info = await api(`/api/labels/${encodeURIComponent(it.name)}`); } catch (e) { box.textContent = e.message; return; }
+  if (focus !== it.name) return;
+  const lab = info.labels, wsName = (id) => info.workspaces.find((w) => w.id === id)?.name || "no workspace";
+  const wsSelect = (cur) => `<select class="lws"><option value="">— none (personal / test)</option>` +
+    info.workspaces.map((w) => `<option value="${esc(w.id)}" ${w.id === cur ? "selected" : ""}>${esc(w.name)}</option>`).join("") + "</select>";
+  box.className = "lbl" + (lab?.status === "suggested" ? " review" : "");
+  const suggest = async (ws) => {
+    box.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    box.querySelector(".lacts").insertAdjacentHTML("beforeend", '<span class="meta">Asking the model… (a few minutes)</span>');
+    try { await api(`/api/labels/${encodeURIComponent(it.name)}/suggest`, { workspace: ws }); }
+    catch (e) { alert(e.message); }
+    lblEdit = null; loadLibrary();
+  };
+  if (!lab) {
+    box.innerHTML = `<div class="lhead"><b>Labels</b><span class="meta">none yet</span></div>
+      <div class="lacts">${wsSelect(info.active)}<button id="lSuggest">Suggest labels</button></div>`;
+    box.querySelector("#lSuggest").onclick = () => suggest(box.querySelector(".lws").value);
+    return;
+  }
+  const editing = lab.status === "suggested" || (lblEdit && lblEdit.name === it.name);
+  if (!editing) {  // confirmed: compact read-only view
+    const chips = (xs) => xs?.length ? xs.map((x) => `<span class="chip-l">${esc(x)}</span>`).join("") : '<span class="meta">—</span>';
+    box.innerHTML = `<div class="lhead"><b>Labels</b><span class="tag ok">confirmed</span><span class="meta">${esc(wsName(lab.workspace))} · ${esc(lab.type)}</span>
+        <button id="lEdit">Edit</button></div>` +
+      LFIELDS.map(([, f, title]) => `<div class="lrow"><span>${title}</span><div class="chips">${chips(lab[f])}</div></div>`).join("");
+    box.querySelector("#lEdit").onclick = () => { lblEdit = { name: it.name, state: null }; renderLabels(it); };
+    return;
+  }
+  if (fresh || !lblEdit || lblEdit.name !== it.name || !lblEdit.state)
+    lblEdit = { name: it.name, state: JSON.parse(JSON.stringify(lab)) };
+  const st = lblEdit.state;
+  // Never pre-decide: a similar-sounding known name is only offered as a hint (e.g. two different people).
+  st.new = (st.new || []).map((n) => ({ action: "", of: "", ...n }));
+  const reg = await registry(st.workspace);
+  if (focus !== it.name) return;
+  const types = st.typing || !st.type || reg.types.includes(st.type) ? reg.types : [...reg.types, st.type];
+  const field = ([kind, f, title]) => `<div class="lrow"><span>${title}</span><div class="chips" data-f="${f}">` +
+    (st[f] || []).map((x, i) => `<span class="chip-l"><span data-ed="${i}" title="Click to correct">${esc(x)}</span><button data-rm="${i}" title="Remove">×</button></span>`).join("") +
+    `<input list="dl-${kind}" placeholder="add…" data-add="${f}"><datalist id="dl-${kind}">` +
+    namesOf(reg, kind).map((n) => `<option value="${esc(n)}">`).join("") + "</datalist></div></div>";
+  const kindSel = (n, i) => `<select data-nk="${i}">${LFIELDS.slice(0, 3).map(([k]) => `<option ${k === n.kind ? "selected" : ""}>${k}</option>`).join("")}</select>`;
+  const newRows = st.new.map((n, i) => `<div class="nrow"><b>${esc(n.name)}</b>${kindSel(n, i)}
+      ${n.maybe ? `<span class="meta">sounds like ${esc(n.maybe)}?</span>` : ""}
+      <select data-na="${i}"><option value="">— decide —</option><option value="add" ${n.action === "add" ? "selected" : ""}>new ${n.kind}</option>
+        <option value="alias" ${n.action === "alias" ? "selected" : ""} ${st.workspace ? "" : "disabled"}>misheard, it is…</option>
+        <option value="ignore" ${n.action === "ignore" ? "selected" : ""}>ignore (noise)</option></select>
+      ${n.action === "add" ? `<span class="meta">spelled</span><input data-as="${i}" value="${esc(n.as ?? n.name)}" title="Correct the spelling; the heard one is kept as an alias">` : ""}
+      ${n.action === "alias" ? `<select data-of="${i}"><option value="">choose…</option>${namesOf(reg, n.kind).map((x) =>
+        `<option ${x === n.of ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>` : ""}</div>`).join("");
+  const undecided = st.new.filter((n) => !n.action || (n.action === "alias" && !n.of) || (n.action === "add" && !(n.as ?? n.name).trim())).length
+    + (st.type.trim() ? 0 : 1);
+  box.innerHTML = `<div class="lhead"><b>Labels</b>${lab.status === "suggested" ? `<span class="tag acc">suggested by ${esc(lab.model || "the model")} · review</span>` : '<span class="tag">editing</span>'}</div>
+    <div class="lrow"><span>Workspace</span><div>${wsSelect(st.workspace)}</div></div>
+    <div class="lrow"><span>Type</span><div><select class="ltype">${types.map((t) => `<option ${!st.typing && t === st.type ? "selected" : ""}>${esc(t)}</option>`).join("")}
+      <option value="__new" ${st.typing ? "selected" : ""}>+ new type…</option></select>
+      ${st.typing ? `<input class="ltypein" value="${esc(st.type)}" placeholder="e.g. internal tech discussion" title="Added to the workspace's meeting types when you confirm">` : ""}</div></div>
+    ${LFIELDS.map(field).join("")}
+    ${st.new.length ? `<div class="lnew"><b>Not in the registry</b> <span class="meta">— decide for each: a new entry, a misheard known name (saved as its alias), or noise</span>${newRows}</div>` : ""}
+    <div class="lacts"><button class="primary" id="lOk" ${undecided ? "disabled" : ""}>Confirm labels</button>
+      ${undecided ? `<span class="meta">${st.type.trim() ? `${undecided} name(s) to decide` : "type the meeting type"}</span>` : ""}
+      <button id="lRe" title="Ask the model again (replaces these suggestions)">Re-suggest</button>
+      ${lab.status === "confirmed" ? '<button id="lCancel">Cancel</button>' : ""}</div>`;
+  const redraw = () => renderLabels(it, false);
+  box.querySelector(".lws").onchange = (e) => { st.workspace = e.target.value; redraw(); };
+  box.querySelector(".ltype").onchange = (e) => {
+    st.typing = e.target.value === "__new";
+    st.type = st.typing ? "" : e.target.value;
+    redraw();
+  };
+  const okState = () => {  // re-check Confirm while typing, without redrawing (keeps the cursor)
+    const n = st.new.filter((x) => !x.action || (x.action === "alias" && !x.of) || (x.action === "add" && !(x.as ?? x.name).trim())).length + (st.type.trim() ? 0 : 1);
+    box.querySelector("#lOk").disabled = !!n;
+  };
+  const tin = box.querySelector(".ltypein");
+  if (tin) { tin.oninput = () => { st.type = tin.value; okState(); }; if (!st.type) tin.focus(); }
+  box.querySelectorAll("[data-as]").forEach((inp) => inp.oninput = () => { st.new[+inp.dataset.as].as = inp.value; okState(); });
+  box.querySelectorAll("[data-ed]").forEach((sp) => sp.onclick = () => {  // move the chip into the box to correct it
+    const f = sp.closest(".chips").dataset.f, v = st[f][+sp.dataset.ed];
+    st[f].splice(+sp.dataset.ed, 1); redraw().then(() => {
+      const inp = $("labelBox")?.querySelector(`[data-add="${f}"]`);
+      if (inp) { inp.value = v; inp.focus(); inp.select(); }
+    });
+  });
+  box.querySelectorAll("[data-rm]").forEach((b) => b.onclick = () => { st[b.closest(".chips").dataset.f].splice(+b.dataset.rm, 1); redraw(); });
+  box.querySelectorAll("[data-add]").forEach((inp) => inp.onkeydown = (e) => {
+    if (e.key !== "Enter" || !inp.value.trim()) return;
+    const f = inp.dataset.add; st[f] = [...(st[f] || []), inp.value.trim()]; redraw();
+  });
+  box.querySelectorAll("[data-add]").forEach((inp) => inp.onchange = () => {  // picked from the list
+    const f = inp.dataset.add, v = inp.value.trim();
+    if (v && namesOf(reg, LFIELDS.find((x) => x[1] === f)[0]).includes(v)) { st[f] = [...(st[f] || []), v]; redraw(); }
+  });
+  box.querySelectorAll("[data-nk]").forEach((sel) => sel.onchange = () => { Object.assign(st.new[+sel.dataset.nk], { kind: sel.value, of: "" }); redraw(); });
+  box.querySelectorAll("[data-na]").forEach((sel) => sel.onchange = () => {
+    const n = st.new[+sel.dataset.na];
+    n.action = sel.value;
+    if (n.action === "alias" && !n.of && n.maybe) n.of = n.maybe;  // you chose "misheard"; start from the hint
+    redraw();
+  });
+  box.querySelectorAll("[data-of]").forEach((sel) => sel.onchange = () => { st.new[+sel.dataset.of].of = sel.value; redraw(); });
+  box.querySelector("#lRe").onclick = () => suggest(st.workspace);
+  if (box.querySelector("#lCancel")) box.querySelector("#lCancel").onclick = () => { lblEdit = null; renderLabels(it); };
+  box.querySelector("#lOk").onclick = async () => {
+    const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
+    try {
+      await api(`/api/labels/${encodeURIComponent(it.name)}/confirm`, {
+        labels: { ...pick(st, ["workspace", "clients", "projects", "people", "topics"]), type: st.type.trim() },
+        learn: st.new.map((n) => ({ ...pick(n, ["name", "kind", "action", "of"]), as: (n.as ?? n.name).trim() })) });
+      delete regCache[st.workspace]; lblEdit = null; loadLibrary();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+// ---------- labels (Settings) ----------
+let regWs = null;
+async function loadLabelSettings() {
+  const r = await api("/api/registry");
+  const opts = (cur, none) => (none ? `<option value="">— none —</option>` : "") +
+    r.workspaces.map((w) => `<option value="${esc(w.id)}" ${w.id === cur ? "selected" : ""}>${esc(w.name)} (${w.entities})</option>`).join("");
+  $("wsActive").innerHTML = opts(r.active, true);
+  $("wsActive").onchange = async () => { await saveSetting("labels", "workspace", $("wsActive").value); loadLabelSettings(); loadWorkspaces(); };
+  if (!r.workspaces.some((w) => w.id === regWs)) regWs = r.active || r.workspaces[0]?.id || null;
+  $("wsEdit").innerHTML = opts(regWs, false);
+  $("wsEdit").onchange = () => { regWs = $("wsEdit").value; loadLabelSettings(); };
+  $("wsNew").onclick = async () => {
+    try {
+      const reg = await api("/api/registry", { name: $("wsNewName").value });
+      $("wsNewName").value = ""; regWs = reg.id;
+      if (confirm(`Created ${reg.name}. Switch to it? Every page then shows its recordings, and new recordings join it.`)) await saveSetting("labels", "workspace", reg.id);
+      loadWorkspaces();
+    } catch (e) { alert(e.message); }
+    loadLabelSettings();
+  };
+  if (!regWs) { $("regBody").innerHTML = '<p class="meta">No workspace yet. Create one above.</p>'; return; }
+  delete regCache[regWs];
+  const reg = await registry(regWs);
+  const detailKeys = { client: ["note"], project: ["client", "note"], person: ["org", "role", "note"], topic: [] };
+  const detail = (e) => detailKeys[e.kind].map((k) => e[k]).filter(Boolean).join(" · ");
+  const section = ([kind, , title]) => {
+    const rows = reg.entities.filter((e) => e.kind === kind)
+      .sort((a, b) => (a.status === "archived") - (b.status === "archived") || a.name.localeCompare(b.name));
+    return `<h3>${title} <span class="meta">${rows.length}</span></h3><table class="reg"><tr><th style="width:22%">Name</th><th style="width:28%">Heard as</th>
+      <th>Details${detailKeys[kind].length ? ` <span class="meta">(${detailKeys[kind].join(" · ")})</span>` : ""}</th><th>Last seen</th><th></th></tr>` +
+      rows.map((e) => `<tr class="${e.status === "archived" ? "arch" : ""}" data-k="${kind}" data-n="${esc(e.name)}"><td>${esc(e.name)}</td>
+        <td>${esc((e.aliases || []).join(", "))}</td><td>${esc(detail(e))}</td><td>${esc(e.last_seen || "—")}</td>
+        <td><button data-ed>Edit</button> <button data-ar>${e.status === "archived" ? "Restore" : "Archive"}</button> <button data-del class="danger">×</button></td></tr>`).join("") +
+      `<tr data-k="${kind}"><td><input data-nn placeholder="add ${kind}…"></td><td><input data-na placeholder="other spellings, comma-separated"></td>
+        <td>${detailKeys[kind].map((k) => `<input data-d="${k}" placeholder="${k}" style="width:${90 / Math.max(1, detailKeys[kind].length)}%">`).join(" ")}</td><td></td><td><button data-add>Add</button></td></tr></table>`;
+  };
+  $("regBody").innerHTML = `<div class="setting"><div class="what"><b>Meeting types</b><p class="hint">Comma-separated; the model picks exactly one.</p></div>
+      <span class="row"><input type="text" id="regTypes" value="${esc(reg.types.join(", "))}" style="width:360px"><button id="regTypesSave">Save</button></span></div>` +
+    LFIELDS.map(section).join("");
+  $("regTypesSave").onclick = async () => {
+    try { await api(`/api/registry/${regWs}/types`, { types: $("regTypes").value.split(",") }); } catch (e) { alert(e.message); }
+    loadLabelSettings();
+  };
+  const ent = (kind, name) => reg.entities.find((e) => e.kind === kind && e.name === name);
+  const save = async (entity, original) => {
+    try { await api(`/api/registry/${regWs}/entity`, { entity, original }); } catch (e) { alert(e.message); }
+    loadLabelSettings();
+  };
+  $("regBody").querySelectorAll("tr[data-n]").forEach((tr) => {
+    const e = ent(tr.dataset.k, tr.dataset.n);
+    tr.querySelector("[data-ar]").onclick = () => save({ ...e, status: e.status === "archived" ? "active" : "archived" }, e.name);
+    tr.querySelector("[data-del]").onclick = async () => {
+      if (!confirm(`Delete ${e.kind} “${e.name}” from the registry? Meetings already labelled keep it. Prefer Archive for anything that was real.`)) return;
+      try { await api(`/api/registry/${regWs}/entity/delete`, { kind: e.kind, name: e.name }); } catch (err) { alert(err.message); }
+      loadLabelSettings();
+    };
+    tr.querySelector("[data-ed]").onclick = () => {
+      const keys = detailKeys[e.kind];
+      tr.innerHTML = `<td><input data-nn value="${esc(e.name)}"></td><td><input data-na value="${esc((e.aliases || []).join(", "))}"></td>
+        <td>${keys.map((k) => `<input data-d="${k}" placeholder="${k}" value="${esc(e[k] || "")}" style="width:${90 / Math.max(1, keys.length)}%">`).join(" ")}</td>
+        <td>${esc(e.last_seen || "—")}</td><td><button data-sv class="primary">Save</button> <button data-cx>Cancel</button></td>`;
+      tr.querySelector("[data-cx]").onclick = loadLabelSettings;
+      tr.querySelector("[data-sv]").onclick = () => save(readRow(tr, e.kind, e), e.name);
+    };
+  });
+  const readRow = (tr, kind, base = {}) => ({ ...base, kind, name: tr.querySelector("[data-nn]").value.trim(),
+    aliases: tr.querySelector("[data-na]").value.split(",").map((x) => x.trim()).filter(Boolean),
+    ...Object.fromEntries([...tr.querySelectorAll("[data-d]")].map((i) => [i.dataset.d, i.value.trim()])) });
+  $("regBody").querySelectorAll("[data-add]").forEach((b) => b.onclick = () => {
+    const tr = b.closest("tr");
+    if (tr.querySelector("[data-nn]").value.trim()) save(readRow(tr, tr.dataset.k));
+  });
+}
+
+// ---------- workspace (header) ----------
+let workspaces = [];
+async function loadWorkspaces() {
+  const r = await api("/api/registry").catch(() => ({ workspaces: [], active: "" }));
+  workspaces = r.workspaces;
+  $("wsTop").innerHTML = r.workspaces.map((w) => `<option value="${esc(w.id)}" ${w.id === r.active ? "selected" : ""}>${esc(w.name)}</option>`).join("") +
+    `<option value="" ${r.active ? "" : "selected"}>— no workspace</option>`;
+}
+$("wsTop").onchange = async () => {
+  await saveSetting("labels", "workspace", $("wsTop").value);
+  focus = null; picked.clear(); lblEdit = null; clearSearch();
+  await loadWorkspaces();
+  const view = document.querySelector("nav.tabs button.on").dataset.view;
+  showView(view);
+};
+
 initSettings();
-loadList();
+loadWorkspaces().then(loadList);
 </script>
 </body>
 </html>

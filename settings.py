@@ -33,6 +33,10 @@ DEFAULTS = {
         "timeout_s": 900,
         "max_input_tokens": 100_000,  # ~2 h of meeting is ~30k tokens
         "unload_after_summary": True,  # free the model's memory as soon as a summary is written
+        "labels_timeout_s": 2700,  # labels-only pass (a reasoning model can think for 15+ min)
+    },
+    "labels": {
+        "workspace": "",           # registry/<id>.json new meetings are labelled in; "" = none
     },
 }
 

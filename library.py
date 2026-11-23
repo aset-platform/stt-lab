@@ -20,8 +20,9 @@ LLM_INBOX = ROOT / "llm" / "inbox"
 LLM_PROCESSED = ROOT / "llm" / "processed"
 LLM_SUMMARIES = ROOT / "llm" / "summaries"
 LLM_COMPARE = ROOT / "llm" / "compare"  # test summaries by other models, see summarise.compare_one
+LLM_LABELS = ROOT / "llm" / "labels"  # meeting labels (suggested / confirmed), see labels.py
 INDEX = ROOT / "library.json"
-for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES, LLM_COMPARE):
+for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES, LLM_COMPARE, LLM_LABELS):
     d.mkdir(parents=True, exist_ok=True)
 
 FOLDERS = {"inbox": "Inbox", "to_summarise": "To summarise", "summarised": "Summarised",
@@ -65,7 +66,8 @@ def glob_escape(s):
 def llm_files(name):
     """Hand-off and summary files belonging to a recording."""
     return [p for p in (LLM_INBOX / f"{name}.md", LLM_PROCESSED / f"{name}.md",
-                        LLM_SUMMARIES / f"{name}.md", LLM_SUMMARIES / f"{name}.json") if p.is_file()] + \
+                        LLM_SUMMARIES / f"{name}.md", LLM_SUMMARIES / f"{name}.json",
+                        LLM_LABELS / f"{name}.json") if p.is_file()] + \
         sorted(LLM_COMPARE.glob(f"{glob_escape(name)}.model=*"))
 
 
@@ -85,23 +87,57 @@ def _title(name):
         return None
 
 
+def _label_status(name):
+    """None, "suggested" (waiting for review) or "confirmed"."""
+    p = LLM_LABELS / f"{name}.json"
+    try:
+        return json.loads(p.read_text()).get("status") if p.is_file() else None
+    except ValueError:
+        return None
+
+
 def folder_of(name, index=None):
     return (index if index is not None else _load()).get(name, {}).get("folder", "inbox")
 
 
-def items():
-    """Every recording with its folder and what has been produced for it."""
+def workspace_of(name, index=None):
+    """The workspace (firm) a recording belongs to; "" = none. Set when it is recorded or added, and
+    when you confirm its labels in another workspace."""
+    entry = (index if index is not None else _load()).get(name, {})
+    if "workspace" in entry:
+        return entry["workspace"]
+    p = LLM_LABELS / f"{name}.json"
+    try:
+        return (json.loads(p.read_text()).get("workspace") or "") if p.is_file() else ""
+    except ValueError:
+        return ""
+
+
+def set_workspace(names, ws):
+    with _lock:
+        index = _load()
+        for name in names:
+            audio_path(name)
+            index.setdefault(name, {})["workspace"] = ws or ""
+        _save(index)
+
+
+def items(ws=None):
+    """Every recording (of workspace `ws`, or all when None) with its folder and what has been produced for it."""
     with _lock:
         index = _load()
         out = []
         for p in sorted(RECORDINGS.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
             if p.suffix.lower() not in AUDIO_EXT:
                 continue
+            if ws is not None and workspace_of(p.name, index) != ws:
+                continue
             t = best_transcript(p.name)
             stats = (t or {}).get("stats", {})
             out.append({
                 "name": p.name,
                 "folder": folder_of(p.name, index),
+                "workspace": workspace_of(p.name, index),
                 "size": p.stat().st_size,
                 "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="minutes"),
                 "duration": stats.get("duration"),
@@ -110,6 +146,7 @@ def items():
                 "queued": (LLM_INBOX / f"{p.name}.md").is_file(),
                 "summary": (LLM_SUMMARIES / f"{p.name}.md").is_file(),
                 "title": _title(p.name),
+                "labels": _label_status(p.name),
             })
         return out
 
@@ -235,18 +272,30 @@ def _summary_texts(data):
     return out
 
 
-def search(q, limit_hits=3):
+def search(q, limit_hits=3, ws=None):
     """Recordings whose name, summary or transcript contain every word of q (case-insensitive).
     Returns {name: {"hits": [{"where", "text", "start"?}], "count": total matching lines}}."""
     words = [w for w in q.lower().split() if w]
     if not words:
         return {}
     match = lambda text: all(w in text.lower() for w in words)
-    out = {}
+    out, index = {}, _load()
     for p in RECORDINGS.iterdir():
         if p.suffix.lower() not in AUDIO_EXT:
             continue
+        if ws is not None and workspace_of(p.name, index) != ws:
+            continue
         hits = [{"where": "name", "text": p.name}] if match(p.name.replace("_", " ")) or match(p.name) else []
+        lj = LLM_LABELS / f"{p.name}.json"
+        if lj.is_file():
+            try:
+                lab = json.loads(lj.read_text())
+                words_ = [lab.get("type", ""), *(n for f in ("clients", "projects", "people", "topics")
+                                                 for n in lab.get(f, []))]
+                if match(" ".join(words_)):
+                    hits.append({"where": "labels", "text": ", ".join(w for w in words_ if w)})
+            except ValueError:
+                pass
         js = LLM_SUMMARIES / f"{p.name}.json"
         if js.is_file():
             try:
