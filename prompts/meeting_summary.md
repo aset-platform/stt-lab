@@ -12,6 +12,10 @@ The transcript was produced automatically:
 Rules:
 - Use only what is in the transcript. Never invent facts, names, numbers or dates.
 - If something is unclear, put it under open_questions rather than guessing.
+- Names: speech recognition often misspells them. Where a name sounds like one in the "Known
+  clients / projects / people" lists further below (including their "heard as" spellings) and fits
+  the context, write it exactly as listed there, in the title, summary, decisions and action items too.
+  Leave other names as they were said.
 - An action item needs a concrete task. Use the owner's name or speaker label if it is clear who
   took it on, otherwise "unassigned". Use a due date only if one was said.
 

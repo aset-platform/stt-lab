@@ -262,6 +262,7 @@ def summarise_one(name, model=None):
         if cfg["unload_after_summary"]:
             unload(model)
     raw = notes.pop("labels", None)
+    notes, _ = labels.respell(notes, ws)  # names the model kept as heard, in the registry spelling
     (library.LLM_SUMMARIES / f"{name}.json").write_text(json.dumps(notes, ensure_ascii=False, indent=1))
     (library.LLM_SUMMARIES / f"{name}.md").write_text(to_markdown(name, notes, model))
     src.rename(library.LLM_PROCESSED / src.name)
@@ -272,6 +273,21 @@ def summarise_one(name, model=None):
         except Exception as e:
             print(f"labels for {name} not saved: {type(e).__name__}: {e}")
     return notes
+
+
+def respell_one(name):
+    """Re-apply the registry spellings to an existing summary (after you taught the registry new
+    spellings). No LLM call. Returns the number of names changed."""
+    library.audio_path(name)
+    js, md = library.LLM_SUMMARIES / f"{name}.json", library.LLM_SUMMARIES / f"{name}.md"
+    if not js.is_file():
+        raise library.LibraryError(f"{name} has no summary")
+    notes, n = labels.respell(json.loads(js.read_text()), labels.of(name))
+    if n:
+        m = re.search(r"summarised by (.+?)_\n", md.read_text()) if md.is_file() else None
+        js.write_text(json.dumps(notes, ensure_ascii=False, indent=1))
+        md.write_text(to_markdown(name, notes, m.group(1) if m else "the summariser"))
+    return n
 
 
 def _transcript(name):
@@ -348,7 +364,16 @@ def main():
                    help="summarise NAMES with each MODEL into llm/compare/ (doesn't touch the real summary)")
     p.add_argument("--label", action="store_true", help="only suggest labels for NAMES (no new summary)")
     p.add_argument("--workspace", help="with --label: workspace id to label in (default: the active one)")
+    p.add_argument("--respell", action="store_true",
+                   help="re-apply registry spellings to the summaries of NAMES (default: all summaries)")
     a = p.parse_args()
+    if a.respell:
+        for name in a.names or sorted(p.name[:-5] for p in library.LLM_SUMMARIES.glob("*.json")):
+            try:
+                print(f"{'✓' if (n := respell_one(name)) else '·'} {name}: {n} name(s) respelled")
+            except Exception as e:
+                print(f"✗ {name}: {type(e).__name__}: {e}")
+        return
     if a.label:
         for name in a.names:
             try:

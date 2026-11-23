@@ -194,6 +194,10 @@ call as the summary; **you confirm them** in Manage (a meeting's detail → Labe
   confirming a meeting records the first/last date each entry was seen.
 - Meetings summarised before labels existed: "Suggest labels" in the detail, or
   `uv run summarise.py --label [--workspace ID] NAME ...` (labels only, no new summary).
+- **Summaries use the registry spellings too.** The model is asked to, and afterwards every "heard as"
+  spelling of a client, project or person left in the summary is replaced with its registry name
+  (whole words; a match that differs only in capitals is left alone). After teaching the registry new
+  spellings, `uv run summarise.py --respell [NAME ...]` re-applies them to existing summaries (no LLM call).
 
 Labels are stored in `llm/labels/<recording>.json` and are covered by the Manage search box.
 
