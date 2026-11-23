@@ -38,6 +38,16 @@ DEFAULTS = {
     "labels": {
         "workspace": "",           # registry/<id>.json new meetings are labelled in; "" = none
     },
+    "index": {                     # the meeting index (Postgres + pgvector, see index.py)
+        "enabled": True,           # index a meeting when its labels are confirmed
+        # docker-compose.yml's database; STT_DB_URL in the environment overrides it
+        "database_url": "postgresql://sttlab:sttlab@127.0.0.1:5433/sttlab",
+        "embed_url": "http://127.0.0.1:11434",  # Ollama's native API
+        "embed_model": "qwen3-embedding:0.6b",
+        "chunk_seconds": 60,       # transcript passages of about a minute
+        "chunk_overlap_seconds": 15,  # each passage repeats the end of the one before, so an exchange
+                                      # across a boundary is whole in at least one of them
+    },
 }
 
 _lock = threading.Lock()

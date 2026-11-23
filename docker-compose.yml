@@ -1,0 +1,24 @@
+# The meeting index: Postgres with pgvector. Only the database runs in Docker; the app and Ollama run
+# natively so they can use the Apple GPU (a Linux container on macOS cannot). Start everything with
+# ./stt-lab up
+services:
+  db:
+    image: pgvector/pgvector:0.8.0-pg17
+    container_name: stt-lab-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${STT_DB_USER:-sttlab}
+      POSTGRES_PASSWORD: ${STT_DB_PASSWORD:-sttlab}
+      POSTGRES_DB: ${STT_DB_NAME:-sttlab}
+    ports:
+      - "127.0.0.1:${STT_DB_PORT:-5433}:5432"  # this Mac only
+    volumes:
+      - stt-lab-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  stt-lab-pgdata:

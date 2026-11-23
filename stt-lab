@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# One command for everything stt-lab needs:
+#   ./stt-lab up       start the index database (Docker), check Ollama, start the app, open the browser
+#   ./stt-lab down     stop the app and the database (data is kept in the Docker volume)
+#   ./stt-lab status   what is running
+#   ./stt-lab logs     follow the app's log
+# The database runs in Docker; the app and Ollama run natively so they can use the Apple GPU.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+PORT="${PORT:-8001}"
+LOG=logs/server.log
+PIDFILE=logs/server.pid
+OLLAMA="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+EMBED_MODEL="$(.venv/bin/python -c 'import settings; print(settings.get("index")["embed_model"])' 2>/dev/null || echo qwen3-embedding:0.6b)"
+mkdir -p logs
+
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+fail() { printf '  \033[31m✗\033[0m %s\n' "$*"; exit 1; }
+
+app_pid() { [[ -f $PIDFILE ]] && kill -0 "$(cat $PIDFILE)" 2>/dev/null && cat $PIDFILE; }
+port_busy() { lsof -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; }
+
+db_up() {
+  if ! docker info >/dev/null 2>&1; then
+    warn "Docker is not running; starting Docker Desktop…"
+    open -a Docker 2>/dev/null || fail "start Docker Desktop, then run ./stt-lab up again"
+    for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
+    docker info >/dev/null 2>&1 || fail "Docker did not start in 2 minutes"
+  fi
+  docker compose up -d --wait >/dev/null 2>&1 || fail "database container did not become healthy (docker compose logs db)"
+  ok "index database (pgvector) on 127.0.0.1:${STT_DB_PORT:-5433}"
+}
+
+ollama_up() {
+  if ! curl -sf "$OLLAMA/api/tags" >/dev/null; then
+    warn "Ollama is not running; starting it…"
+    (brew services start ollama >/dev/null 2>&1 || nohup ollama serve >logs/ollama.log 2>&1 &)
+    for _ in $(seq 1 30); do curl -sf "$OLLAMA/api/tags" >/dev/null && break; sleep 1; done
+    curl -sf "$OLLAMA/api/tags" >/dev/null || { warn "Ollama not reachable: summaries and the index wait until it is"; return; }
+  fi
+  ok "Ollama at $OLLAMA"
+  if ! curl -sf "$OLLAMA/api/tags" | grep -q "\"$EMBED_MODEL\""; then
+    warn "pulling the embedding model $EMBED_MODEL (once)…"
+    ollama pull "$EMBED_MODEL" >/dev/null && ok "pulled $EMBED_MODEL"
+  fi
+}
+
+app_up() {
+  if pid=$(app_pid); then ok "app already running (pid $pid) on http://127.0.0.1:$PORT"; return; fi
+  port_busy && fail "port $PORT is in use by another program (stop it, or PORT=9000 ./stt-lab up)"
+  PORT=$PORT nohup .venv/bin/python -u server.py >>"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+  for _ in $(seq 1 120); do curl -sf "http://127.0.0.1:$PORT/" >/dev/null && break; sleep 1; done
+  curl -sf "http://127.0.0.1:$PORT/" >/dev/null || fail "app did not start; see $LOG"
+  ok "app on http://127.0.0.1:$PORT (log: $LOG)"
+}
+
+case "${1:-up}" in
+  up)
+    echo "Starting stt-lab"
+    db_up; ollama_up; app_up
+    [[ -n "${STT_NO_BROWSER:-}" ]] || open "http://127.0.0.1:$PORT" 2>/dev/null || true ;;
+  down)
+    echo "Stopping stt-lab"
+    if pid=$(app_pid); then kill "$pid"; rm -f "$PIDFILE"; ok "app stopped"; else warn "app was not started by ./stt-lab (stop it where it runs)"; fi
+    docker compose stop >/dev/null 2>&1 && ok "database stopped (data kept)" ;;
+  status)
+    if pid=$(app_pid); then ok "app running (pid $pid) on http://127.0.0.1:$PORT"
+    elif port_busy; then ok "app running on port $PORT (started outside ./stt-lab)"
+    else warn "app not running"; fi
+    docker compose ps --status running --services 2>/dev/null | grep -q db && ok "database running" || warn "database not running"
+    curl -sf "$OLLAMA/api/tags" >/dev/null && ok "Ollama running" || warn "Ollama not running" ;;
+  logs) tail -f "$LOG" ;;
+  *) echo "usage: ./stt-lab up | down | status | logs"; exit 2 ;;
+esac

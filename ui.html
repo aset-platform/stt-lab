@@ -275,6 +275,7 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <div class="f sel" data-pane="cfgTranscribe">Transcription</div>
         <div class="f" data-pane="cfgSummariser">Summariser</div>
         <div class="f" data-pane="cfgLabels">Labels</div>
+        <div class="f" data-pane="cfgIndex">Search index</div>
       </div>
     </div>
   </aside>
@@ -298,6 +299,31 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <select data-set="transcription.task"><option value="translate">English</option><option value="transcribe">As spoken</option></select></div>
       <div class="setting"><div class="what"><b>Speakers</b><p class="hint">0 = detect automatically</p></div>
         <input type="number" min="0" max="20" style="width:70px" data-set="transcription.speakers"></div>
+    </div>
+  </section>
+
+  <section class="settings" id="cfgIndex" hidden>
+    <div class="panel">
+      <h2>Search index</h2>
+      <p class="hint">Confirmed meetings are stored in Postgres (pgvector) as summary points, decisions, action items and
+        one-minute transcript passages, each with its labels, for search by meaning (and later the MCP server).
+        Meetings are added when you confirm their labels and kept in step when you move, rename or delete them.</p>
+      <div id="idxStatus" class="meta">Loading…</div>
+      <div class="setting"><div class="what"><b>Index confirmed meetings</b>
+        <p class="hint">Off: nothing is added or changed in the index.</p></div>
+        <input type="checkbox" data-set="index.enabled"></div>
+    </div>
+    <div class="panel">
+      <h2>Try a search</h2>
+      <p class="hint">Searches the workspace selected at the top. Ask in plain words, e.g. “what did the client ask for in the demo”.</p>
+      <div class="lacts" style="gap:6px;display:flex;flex-wrap:wrap">
+        <input id="idxQ" placeholder="Ask about your meetings…" style="flex:1;min-width:240px">
+        <select id="idxKind"><option value="">everything</option><option value="summary">summary points</option>
+          <option value="decision">decisions</option><option value="action">action items</option>
+          <option value="question">open questions</option><option value="transcript">transcript</option></select>
+        <button class="primary" id="idxGo">Search</button>
+      </div>
+      <div id="idxResults" style="margin-top:10px"></div>
     </div>
   </section>
 
@@ -1034,6 +1060,7 @@ async function loadSettings() {
     if (el.type === "checkbox") el.checked = cfg[section][key]; else el.value = cfg[section][key];
   });
   if (cfgPane === "cfgLabels") return loadLabelSettings();
+  if (cfgPane === "cfgIndex") return loadIndexSettings();
   if (cfgPane !== "cfgSummariser") return;
   $("llmServer").textContent = `LLM server: ${cfg.llm.base_url}. The model in use writes every summary, manual and auto-summarise.`;
   const box = $("modelTable");
@@ -1290,6 +1317,36 @@ async function loadLabelSettings() {
     if (tr.querySelector("[data-nn]").value.trim()) save(readRow(tr, tr.dataset.k));
   });
 }
+
+// ---------- search index (Settings) ----------
+async function loadIndexSettings() {
+  const s = await api("/api/index/status").catch((e) => ({ ok: false, message: e.message }));
+  const last = s.last_sync ? (s.last_sync.error ? ` · last sync failed: ${esc(s.last_sync.error)}`
+    : ` · last sync ${esc(s.last_sync.at.replace("T", " "))}`) : "";
+  $("idxStatus").innerHTML = !s.ok
+    ? `<p class="warn">${esc(s.message || "index not available")}</p><p class="hint">Start the database with <code>./stt-lab up</code>.</p>`
+    : `<p><span class="chip ok">ready</span> ${s.meetings} meeting(s), ${s.passages} passages · embeddings: ${esc(s.embed_model)}${last}</p>
+       <p class="hint">${Object.entries(s.by_workspace).map(([w, n]) => `${esc(workspaces.find((x) => x.id === w)?.name || w || "no workspace")}: ${n}`).join(" · ") || "Nothing indexed yet."}
+       ${s.pending.length ? ` · <b>${s.pending.length} waiting</b>${s.syncing ? " (indexing…)" : ""}` : ""}</p>
+       <button id="idxSync">Index now</button>`;
+  if ($("idxSync")) $("idxSync").onclick = async () => { await api("/api/index/sync", {}); setTimeout(loadIndexSettings, 1500); };
+}
+async function runIndexSearch() {
+  const q = $("idxQ").value.trim();
+  if (!q) return;
+  $("idxResults").innerHTML = '<span class="meta">Searching…</span>';
+  try {
+    const rows = await api(`/api/index/search?q=${encodeURIComponent(q)}&k=10` + ($("idxKind").value ? `&kind=${$("idxKind").value}` : ""));
+    const t = (s) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+    $("idxResults").innerHTML = rows.length ? `<table class="reg"><tr><th>Match</th><th>Meeting</th><th>What</th><th>Text</th></tr>` +
+      rows.map((r) => `<tr><td>${r.score.toFixed(2)}</td><td>${esc(r.title)}<div class="meta">${esc(r.held || "")}</div></td>
+        <td>${esc(r.kind)}${r.owner ? `<div class="meta">${esc(r.owner)}</div>` : ""}${r.kind === "transcript" ? `<div class="meta">@ ${t(r.start_s)}</div>` : ""}</td>
+        <td style="white-space:pre-wrap;text-align:left">${esc(r.text)}</td></tr>`).join("") + "</table>"
+      : '<span class="meta">No confirmed meetings in this workspace yet.</span>';
+  } catch (e) { $("idxResults").innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+}
+$("idxGo").onclick = runIndexSearch;
+$("idxQ").onkeydown = (e) => { if (e.key === "Enter") runIndexSearch(); };
 
 // ---------- workspace (header) ----------
 let workspaces = [];
