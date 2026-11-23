@@ -176,6 +176,27 @@ summarising from the UI, the server unloads Whisper and pyannote (they reload on
 and summarising runs on the same job queue as transcription so the two never overlap. When using
 `summarise.py` directly, stop the server first.
 
+## Meeting labels (workspaces and registry)
+
+Each meeting gets labels for search and filtering, and later for the vector store: **workspace**, meeting
+**type**, **clients**, **projects**, **people** and **topics**. The summariser suggests them in the same LLM
+call as the summary; **you confirm them** in Manage (a meeting's detail → Labels) before they count.
+
+- **Workspace = one firm.** Each has its own registry, `registry/<id>.json` (git-ignored: it holds real
+  names), with the meeting types and the known clients, projects, people and topics. Working with another
+  firm means a new, empty workspace (Settings → Labels); older meetings keep their own workspace.
+- **Misheard names.** Speech recognition spells names differently each time. Every registry entry has
+  "heard as" spellings; the model is given the registry and writes the known name, and the review maps
+  anything left over. For each name not in the registry you decide: a new entry, a misheard known name
+  (saved as its alias, so it is recognised next time), or noise. A similar-sounding known name is shown as
+  a hint, never chosen for you.
+- **Things change.** Entries can be archived (kept on old meetings, marked "past" for the model), and
+  confirming a meeting records the first/last date each entry was seen.
+- Meetings summarised before labels existed: "Suggest labels" in the detail, or
+  `uv run summarise.py --label [--workspace ID] NAME ...` (labels only, no new summary).
+
+Labels are stored in `llm/labels/<recording>.json` and are covered by the Manage search box.
+
 ## How it works
 
 ### File mode (upload, YouTube, Transcribe button)
@@ -293,6 +314,7 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `recordings/` | Uploaded, fetched and recorded audio (git-ignored, except the `sample-*` files) |
 | `out/ui/` | Saved transcripts, `<recording>.medium.en.json/.txt` (git-ignored, except `sample-*`) |
 | `scripts/repo_guard.py`, `.githooks/pre-commit`, `.github/workflows/repo-guard.yml` | Pre-commit and CI checks: audio only as `recordings/sample-*`, at most 10 minutes |
+| `labels.py`, `prompts/meeting_labels.md` | Meeting labels, workspaces and registries; `registry/` and `llm/labels/` hold the data (git-ignored) |
 | `settings.json` | All settings, one section per feature, edited in the Settings tab; defaults in `settings.py` (git-ignored; replaces the older `llm.json`, which is moved in automatically) |
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
 | `summarise.py` | LLM summariser (OpenAI-compatible API) and its CLI |

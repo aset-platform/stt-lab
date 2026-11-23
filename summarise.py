@@ -14,6 +14,7 @@ Usage:
   uv run summarise.py NAME ...    # summarise specific recordings
   uv run summarise.py --models    # list the chat models the server has
   uv run summarise.py --compare qwen3.5:9b gpt-oss:20b NAME ...   # side-by-side test, see compare_one()
+  uv run summarise.py --label [--workspace ID] NAME ...  # suggest labels only (meetings already summarised)
 """
 import argparse
 import json
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import labels
 import library
 import settings
 
@@ -200,11 +202,23 @@ def to_markdown(name, notes, model):
             + section("Open questions", notes.get("open_questions", [])))
 
 
-def _summarise(cfg, model, name, transcript):
-    """Run the LLM on one transcript; returns the parsed notes with timing and memory in _meta."""
+def summary_prompt(ws):
+    """The summary instructions plus the label instructions for workspace `ws` (one LLM call does both)."""
+    return (PROMPT_FILE.read_text().rstrip() + "\n\n" + labels.prompt_block(ws).rstrip()
+            + '\n\nPut "labels" in the same JSON object, as one more key next to "title", "summary" and the rest.\n')
+
+
+def labels_prompt(ws):
+    return ("You label meeting transcripts. They were produced automatically: Hindi/English speech translated to "
+            "English, speakers labelled SPEAKER_00, SPEAKER_01, ... by voice.\n\n" + labels.prompt_block(ws).rstrip()
+            + '\n\nReply with a single JSON object and nothing else: {"labels": {...}}\n')
+
+
+def _summarise(cfg, model, name, transcript, prompt, timeout=None):
+    """Run the LLM on one transcript with system prompt `prompt`; returns the parsed JSON with timing
+    and memory in _meta."""
     if len(transcript) / 4 > cfg["max_input_tokens"]:  # ~4 characters per token
         raise library.LibraryError(f"transcript is ~{len(transcript) // 4} tokens, over max_input_tokens")
-    prompt = PROMPT_FILE.read_text()
     t0 = time.perf_counter()
     reply = _request(cfg, "/chat/completions", {
         "model": model,
@@ -212,7 +226,7 @@ def _summarise(cfg, model, name, transcript):
                      {"role": "user", "content": transcript}],
         "temperature": 0.2,
         #"response_format": {"type": "json_object"},
-    }, timeout=cfg["timeout_s"])
+    }, timeout=timeout or cfg["timeout_s"])
     seconds = round(time.perf_counter() - t0, 1)
     mem = memory(cfg, model)  # read while the model is still loaded
     # Servers like Ollama silently cut the input to their context window (default 4096 tokens), and the
@@ -241,16 +255,54 @@ def summarise_one(name, model=None):
     src = library.LLM_INBOX / f"{name}.md"
     if not src.is_file():
         raise library.LibraryError(f"{name} is not queued; move it to 'To summarise' first")
+    ws = labels.of(name)  # the recording's own workspace, whichever is selected in the header now
     try:
-        notes = _summarise(cfg, model, name, src.read_text())
+        notes = _summarise(cfg, model, name, src.read_text(), summary_prompt(ws))
     finally:
         if cfg["unload_after_summary"]:
             unload(model)
+    raw = notes.pop("labels", None)
     (library.LLM_SUMMARIES / f"{name}.json").write_text(json.dumps(notes, ensure_ascii=False, indent=1))
     (library.LLM_SUMMARIES / f"{name}.md").write_text(to_markdown(name, notes, model))
     src.rename(library.LLM_PROCESSED / src.name)
     library.mark_summarised(name)
+    if isinstance(raw, dict):  # a label problem never costs the summary; labels can be re-suggested
+        try:
+            labels.save_suggestion(name, labels.from_llm(raw, ws, model))
+        except Exception as e:
+            print(f"labels for {name} not saved: {type(e).__name__}: {e}")
     return notes
+
+
+def _transcript(name):
+    """The transcript handed to the summariser, queued or already summarised."""
+    library.audio_path(name)
+    src = next((p for p in (library.LLM_INBOX / f"{name}.md", library.LLM_PROCESSED / f"{name}.md")
+                if p.is_file()), None)
+    if not src:
+        raise library.LibraryError(f"{name} has no transcript handed to the summariser yet; "
+                                   "move it to 'To summarise' first")
+    return src.read_text()
+
+
+def label_one(name, ws=None, model=None):
+    """Suggest labels for a meeting without re-summarising it (e.g. meetings summarised before labels
+    existed). Replaces earlier labels, confirmed ones too, with a new suggestion to review."""
+    cfg = config()
+    model = model or cfg["model"]
+    ws = labels.of(name) if ws is None else ws
+    try:
+        # Thinking stays on: with it off (Ollama reasoning_effort "none") the 9b was 4x faster but added
+        # registry names that were never said and missed real ones. With it on, one meeting took 7 min
+        # and another ran past the 15-min summary timeout, so labels get their own, longer limit.
+        reply = _summarise(cfg, model, name, _transcript(name), labels_prompt(ws), timeout=cfg["labels_timeout_s"])
+    finally:
+        if cfg["unload_after_summary"]:
+            unload(model)
+    raw = reply.get("labels", reply)
+    if not isinstance(raw, dict):
+        raise library.LibraryError("the model's reply had no labels")
+    return labels.save_suggestion(name, labels.from_llm(raw, ws, model), force=True)
 
 
 # ---------- model comparison ----------
@@ -264,13 +316,8 @@ def _compare_path(name, model, ext):
 def compare_one(name, model):
     """Summarise a recording's transcript (queued or already summarised) with `model`, for comparison."""
     cfg = config()
-    library.audio_path(name)
-    src = next((p for p in (library.LLM_INBOX / f"{name}.md", library.LLM_PROCESSED / f"{name}.md")
-                if p.is_file()), None)
-    if not src:
-        raise library.LibraryError(f"{name} has no transcript handed to the summariser yet; "
-                                   "move it to 'To summarise' first")
-    notes = _summarise(cfg, model, name, src.read_text())
+    notes = _summarise(cfg, model, name, _transcript(name), summary_prompt(labels.of(name)))
+    notes.pop("labels", None)  # same prompt as a real summary; labels aren't compared
     _compare_path(name, model, ".json").write_text(json.dumps(notes, ensure_ascii=False, indent=1))
     _compare_path(name, model, ".md").write_text(to_markdown(name, notes, model))
     return notes
@@ -299,7 +346,19 @@ def main():
     p.add_argument("--models", action="store_true", help="list the chat models the server has")
     p.add_argument("--compare", nargs="+", metavar="MODEL",
                    help="summarise NAMES with each MODEL into llm/compare/ (doesn't touch the real summary)")
+    p.add_argument("--label", action="store_true", help="only suggest labels for NAMES (no new summary)")
+    p.add_argument("--workspace", help="with --label: workspace id to label in (default: the active one)")
     a = p.parse_args()
+    if a.label:
+        for name in a.names:
+            try:
+                lab = label_one(name, a.workspace)
+                found = {f: lab[f] for f in labels.KINDS.values() if lab[f]}
+                print(f"✓ {name} [{lab['workspace'] or 'no workspace'}] {lab['type']}: {found}"
+                      + (f" new: {[n['name'] for n in lab['new']]}" if lab["new"] else ""))
+            except Exception as e:
+                print(f"✗ {name}: {type(e).__name__}: {e}")
+        return
     if a.models:
         default = config()["model"]
         print("\n".join(f"{m}{'  (default)' if m == default else ''}" for m in models()) or "no models found")

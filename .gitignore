@@ -25,3 +25,6 @@ llm.json
 settings.json
 # Local word list for scripts/repo_guard.py
 .guard-terms
+
+# Label registries: real client, project and people names (see labels.py)
+registry/

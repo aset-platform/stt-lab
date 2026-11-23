@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from faster_whisper.audio import decode_audio
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
+import labels
 import library
 import settings
 import summarise
@@ -301,6 +302,7 @@ async def live(ws: WebSocket, model: str = "medium", lang: str = "", task: str =
         name, n = f"{stem}-{n}.wav", n + 1
     with wave.open(str(RECORDINGS / name), "wb") as w:
         w.setnchannels(1), w.setsampwidth(2), w.setframerate(SR), w.writeframes(bytes(pcm))
+    claim(name)
     # The live text came from short 10 s chunks; redo the whole recording the same way as the
     # Transcribe button (25 s chunks, more context) and label speakers, streaming progress back.
     events = asyncio.Queue()
@@ -337,7 +339,12 @@ def index():
 
 @app.get("/api/recordings")
 def recordings():
-    return [it for it in library.items() if it["folder"] != "trash"]
+    return [it for it in library.items(labels.active()) if it["folder"] != "trash"]
+
+
+def claim(name):
+    """A new recording joins the workspace selected in the header."""
+    library.set_workspace([name], labels.active())
 
 
 # ---------- library (Manage tab) ----------
@@ -348,7 +355,7 @@ def _not_busy(names):
 
 @app.get("/api/library")
 def library_list():
-    items = library.items()
+    items = library.items(labels.active())
     counts = {f: 0 for f in library.FOLDERS}
     for it in items:
         counts[it["folder"]] += 1
@@ -360,6 +367,15 @@ def library_list():
 def library_move(names: list[str] = Body(), folder: str = Body()):
     _not_busy(names)
     library.move(names, folder)
+    return {"ok": True}
+
+
+@app.post("/api/library/workspace")
+def library_workspace(names: list[str] = Body(), workspace: str = Body()):
+    """Move recordings to another workspace ("" = none). Their labels stay until you re-label them."""
+    if workspace and not labels.exists(workspace):
+        raise HTTPException(400, f"no workspace {workspace!r}")
+    library.set_workspace(names, workspace)
     return {"ok": True}
 
 
@@ -383,7 +399,7 @@ def library_empty_trash():
 
 @app.get("/api/library/search")
 def library_search(q: str = ""):
-    return library.search(q)
+    return library.search(q, ws=labels.active())
 
 
 @app.get("/api/library/summary/{name}")
@@ -396,7 +412,7 @@ def library_summary(name: str):
 def llm_status():
     # a recording being auto-summarised is still in the inbox; don't offer it for a second run
     return {**summarise.check(), "models": summarise.models(),
-            "queued": [n for n in summarise.queued() if n not in busy]}
+            "queued": [n for n in summarise.queued() if n not in busy and library.workspace_of(n) == labels.active()]}
 
 
 # ---------- Settings tab ----------
@@ -411,7 +427,68 @@ def settings_set(changes: dict = Body(embed=True)):
     model = changes.get("llm", {}).get("model")
     if model is not None and model not in summarise.models():
         raise HTTPException(400, f"model {model!r} is not available")
+    ws = changes.get("labels", {}).get("workspace")
+    if ws:
+        labels.load(ws)  # must exist
     return settings.update(changes)
+
+
+# ---------- labels and workspaces ----------
+@app.get("/api/registry")
+def registry_list():
+    return {"workspaces": labels.workspaces(), "active": labels.active(), "kinds": list(labels.KINDS)}
+
+
+@app.post("/api/registry")
+def registry_create(name: str = Body(embed=True)):
+    return labels.create_workspace(name)
+
+
+@app.get("/api/registry/{ws}")
+def registry_get(ws: str):
+    return labels.load(ws)
+
+
+@app.post("/api/registry/{ws}/entity")
+def registry_entity(ws: str, entity: dict = Body(), original: str | None = Body(None)):
+    return labels.upsert_entity(ws, entity, original)
+
+
+@app.post("/api/registry/{ws}/entity/delete")
+def registry_entity_delete(ws: str, kind: str = Body(), name: str = Body()):
+    labels.delete_entity(ws, kind, name)
+    return {"ok": True}
+
+
+@app.post("/api/registry/{ws}/types")
+def registry_types(ws: str, types: list[str] = Body(embed=True)):
+    return labels.set_types(ws, types)
+
+
+@app.get("/api/labels/{name}")
+def labels_get(name: str):
+    return {"labels": labels.get(name), "active": labels.of(name), "workspaces": labels.workspaces()}
+
+
+@app.post("/api/labels/{name}/suggest")
+async def labels_suggest(name: str, workspace: str | None = Body(None, embed=True)):
+    """Ask the LLM for labels (no new summary). Runs on the job thread, like summaries."""
+    _not_busy([name])
+    status = summarise.check()
+    if not status["ok"]:
+        raise HTTPException(503, status["message"])
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(worker, release_models)
+    busy.add(name)
+    try:
+        return await loop.run_in_executor(worker, summarise.label_one, name, workspace)
+    finally:
+        busy.discard(name)
+
+
+@app.post("/api/labels/{name}/confirm")
+def labels_confirm(name: str, labels_: dict = Body(alias="labels"), learn: list[dict] = Body([])):
+    return labels.confirm(name, labels_, learn)
 
 
 @app.get("/api/llm/models")
@@ -500,6 +577,7 @@ async def upload(file: UploadFile):
     while dest.exists():
         dest, n = RECORDINGS / f"{stem}-{n}{ext}", n + 1
     dest.write_bytes(await file.read())
+    claim(dest.name)
     return {"name": dest.name}
 
 
@@ -518,6 +596,7 @@ def youtube(url: str = Body(embed=True)):
             path = Path(ydl.prepare_filename(info))
     except Exception as e:
         raise HTTPException(400, f"download failed: {e}")
+    claim(path.name)
     return {"name": path.name, "title": info.get("title"), "duration": info.get("duration")}
 
 
