@@ -72,9 +72,20 @@ transcripts; recordings then wait in *To summarise* until an LLM is available.
 ### 4. Run
 
 ```bash
+./stt-lab up                             # index database (Docker) + Ollama check + app, opens the browser
+./stt-lab status | logs | down           # down stops the app and the database (data is kept)
+```
+
+Or without the index database (everything else works; the index catches up when the database is back):
+
+```bash
 uv run server.py                         # then open http://127.0.0.1:8001
 PORT=9000 uv run server.py               # if 8001 is taken
 ```
+
+Only the database runs in Docker. The app and Ollama run natively: Docker on macOS runs a Linux VM with no
+access to the Apple GPU, so Whisper (MLX) and the summariser would fall back to the CPU and live
+transcription could not keep up.
 
 The first start downloads **Whisper medium** (~1.5 GB, public) into `~/.cache/huggingface`
 (`First run: downloading Whisper medium...`); later starts need no internet. **pyannote community-1**
@@ -201,6 +212,43 @@ call as the summary; **you confirm them** in Manage (a meeting's detail → Labe
 
 Labels are stored in `llm/labels/<recording>.json` and are covered by the Manage search box.
 
+## Search index (Postgres + pgvector)
+
+Confirmed meetings are indexed for search by meaning, the base for the MCP server.
+
+- **One index per workspace.** Each firm's meetings live in their own Postgres schema (`ws_<id>`) with their
+  own tables and HNSW index; nothing is shared or mixed, a search runs inside one workspace, and a firm's
+  index can be dropped as a whole (`uv run index.py drop-workspace ID`). Moving a meeting to another
+  workspace moves its vectors; confirmed meetings in no workspace are not indexed.
+- **Database:** `docker-compose.yml` runs `pgvector/pgvector` on `127.0.0.1:5433` (this Mac only), data in
+  the `stt-lab-pgdata` volume. Settings "index" section, or `STT_DB_URL`, points elsewhere.
+- **Embeddings:** `qwen3-embedding:0.6b` in Ollama (0.6 GB, fits next to the summariser; `./stt-lab up`
+  pulls it once). A meeting embeds in a few seconds.
+- **What is stored:** a `meetings` row (workspace, date, title, type, clients, projects, people, topics) and
+  `passages`: each summary point, decision, action item (with owner and due date) and open question, and
+  the transcript in one-minute passages, at most 2000 characters (whole lines; an over-long line is split
+  at sentence ends, each starting ~15 s before the previous one ends,
+  so an exchange across a boundary stays whole) with start time and speakers. Each passage is embedded with
+  its meeting's title, date, clients and projects in front, so short points keep their context.
+- **Index:** HNSW (cosine) on the embeddings with iterative scan, so a filtered search still returns the
+  number of results asked for; label filters are exact (lowercase keys such as `client:acme`, GIN index)
+  and a misheard name given as a filter is resolved through the workspace registry first. Changing the
+  chunking settings re-indexes meetings on the next sync.
+- **Only confirmed meetings**, so the label filters can be trusted. The index follows the library: confirm,
+  move, rename, delete and new summaries trigger a sync that re-embeds only what changed; Trash is removed.
+- **Settings → Search index** shows each workspace's index and has a search box to try it. **Sync now**
+  is only needed if the database or Ollama was down when something changed (or a summary was changed
+  outside the app, e.g. `--respell`): it indexes new or changed confirmed meetings and removes those in
+  Trash, without re-embedding anything unchanged.
+
+```bash
+uv run index.py status
+uv run index.py backfill                                   # index confirmed meetings that are new or changed
+uv run index.py search "what did the client ask for" --client Acme --kind action --since 2026-11-01
+```
+
+Changing the embedding model needs `uv run index.py reset` and a backfill (vectors of two models don't mix).
+
 ## How it works
 
 ### File mode (upload, YouTube, Transcribe button)
@@ -319,6 +367,8 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `out/ui/` | Saved transcripts, `<recording>.medium.en.json/.txt` (git-ignored, except `sample-*`) |
 | `scripts/repo_guard.py`, `.githooks/pre-commit`, `.github/workflows/repo-guard.yml` | Pre-commit and CI checks: audio only as `recordings/sample-*`, at most 10 minutes |
 | `labels.py`, `prompts/meeting_labels.md` | Meeting labels, workspaces and registries; `registry/` and `llm/labels/` hold the data (git-ignored) |
+| `index.py` | Search index: confirmed meetings as passages with embeddings in Postgres (pgvector) |
+| `docker-compose.yml`, `stt-lab` | The index database container, and the one-command launcher (`./stt-lab up`) |
 | `settings.json` | All settings, one section per feature, edited in the Settings tab; defaults in `settings.py` (git-ignored; replaces the older `llm.json`, which is moved in automatically) |
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
 | `summarise.py` | LLM summariser (OpenAI-compatible API) and its CLI |

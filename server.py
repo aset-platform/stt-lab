@@ -9,6 +9,7 @@ import os
 import json
 import queue
 import re
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from faster_whisper.audio import decode_audio
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
+import index
 import labels
 import library
 import settings
@@ -45,6 +47,34 @@ mx.set_cache_limit(512 * 2**20)
 worker = ThreadPoolExecutor(max_workers=1)
 app = FastAPI()
 busy = set()  # recordings being transcribed right now: not renamable or deletable
+
+# ---------- meeting index (Postgres + pgvector) ----------
+# Kept in step with the library by a sync after every change (confirm, move, rename, delete, summary):
+# it only re-embeds meetings whose labels or summary changed, so a sync with nothing to do is one query.
+indexer = ThreadPoolExecutor(max_workers=1)  # embeddings are Ollama calls: off the MLX thread
+_sync_state = {"queued": False, "last": None}
+_sync_lock = threading.Lock()
+
+
+def reindex_soon():
+    if not index.config()["enabled"]:
+        return
+    with _sync_lock:
+        if _sync_state["queued"]:
+            return  # the queued sync will see this change too
+        _sync_state["queued"] = True
+    indexer.submit(_sync)
+
+
+def _sync():
+    with _sync_lock:
+        _sync_state["queued"] = False
+    try:
+        done, removed, failed = index.sync(log=lambda m: print(f"[index] {m}"))
+        _sync_state["last"] = {"at": datetime.now().isoformat(timespec="seconds"), "indexed": done,
+                               "removed": removed, "failed": failed}
+    except Exception as e:  # database or embedding model not running: the library works without them
+        _sync_state["last"] = {"at": datetime.now().isoformat(timespec="seconds"), "error": str(e)}
 
 
 @app.exception_handler(LibraryError)
@@ -157,6 +187,7 @@ def summarise_after(name, emit):
     try:
         release_models()  # make room for the LLM; speech models reload on the next transcription
         notes = summarise.summarise_one(name)
+        reindex_soon()
         emit({"type": "summary_done", "name": name, "title": notes.get("title"),
               "action_items": len(notes.get("action_items") or []), "seconds": notes["_meta"]["seconds"]})
     except Exception as e:
@@ -332,8 +363,44 @@ async def live(ws: WebSocket, model: str = "medium", lang: str = "", task: str =
     await close()
 
 
+@app.middleware("http")
+async def keep_index_in_step(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if request.method == "POST" and response.status_code < 400 and (
+            path.startswith("/api/library/") or path == "/api/llm/summarise"
+            or (path.startswith("/api/labels/") and path.endswith("/confirm"))):
+        reindex_soon()
+    return response
+
+
+@app.on_event("startup")
+def index_on_start():
+    reindex_soon()
+
+
+@app.get("/api/index/status")
+def index_status():
+    return {**index.status(), "last_sync": _sync_state["last"], "syncing": _sync_state["queued"]}
+
+
+@app.post("/api/index/sync")
+def index_sync():
+    reindex_soon()
+    return {"ok": True}
+
+
+@app.get("/api/index/search")
+def index_search(q: str, workspace: str | None = None, client: str | None = None, project: str | None = None,
+                 person: str | None = None, kind: str | None = None, since: str | None = None,
+                 until: str | None = None, k: int = 8):
+    """Meaning search over confirmed meetings, in the selected workspace unless one is given."""
+    return index.search(q, labels.active() if workspace is None else workspace, client, project, person,
+                        kind, since, until, min(k, 50))
+
+
 @app.get("/")
-def index():
+def index_page():
     return FileResponse(ROOT / "ui.html")
 
 

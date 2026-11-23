@@ -28,3 +28,6 @@ settings.json
 
 # Label registries: real client, project and people names (see labels.py)
 registry/
+
+# ./stt-lab logs and pid
+logs/
