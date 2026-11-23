@@ -223,6 +223,48 @@ def prompt_block(ws):
     return text
 
 
+# ---------- spelling in summaries ----------
+def respell(obj, ws):
+    """Write every "heard as" spelling of a known client, project or person in its registry spelling,
+    in all the strings of a summary (title, bullets, action-item owners...). Returns (obj, changes).
+    Whole words only, longest match first, so "Jon Smith" is left alone where "Jon" is an alias of it."""
+    if not exists(ws):
+        return obj, 0
+    names = {}
+    for e in load(ws)["entities"]:
+        if e["kind"] in NAMED:
+            for n in [e["name"], *e.get("aliases", [])]:
+                if n.strip():
+                    names.setdefault(n.strip().lower(), e["name"])
+    if not names:
+        return obj, 0
+    pattern = re.compile(r"(?<!\w)(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) + r")(?!\w)",
+                         re.IGNORECASE)
+    changes = 0
+
+    def fix(text):
+        nonlocal changes
+        def one(m):
+            nonlocal changes
+            right = names[m.group(0).lower()]
+            if m.group(0).lower() == right.lower():  # same word: keep its case ("atlas" is not the project Atlas)
+                return m.group(0)
+            changes += 1
+            return right
+        return pattern.sub(one, text)
+
+    def walk(x):
+        if isinstance(x, str):
+            return fix(x)
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        if isinstance(x, dict):
+            return {k: walk(v) for k, v in x.items()}
+        return x
+
+    return walk(obj), changes
+
+
 # ---------- meeting labels ----------
 def _file(name):
     library.audio_path(name)  # a real recording's plain file name only
