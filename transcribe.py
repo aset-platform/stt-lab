@@ -68,8 +68,12 @@ def diarize(samples, num_speakers):
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
     def embed(start, end):
-        s = int(start * SR)
-        clip = samples[s:max(int(end * SR), s + SR)]  # at least 1 s of audio
+        # At least 1 s of audio, kept inside the recording: pyannote can report a turn that starts at
+        # or past the end of the audio (its windows are padded), which gave an empty clip and
+        # "AssertionError: choose a window size 400 that is [2, 0]" from the embedding's fbank.
+        n = len(samples)
+        s = max(0, min(int(start * SR), n - SR))
+        clip = samples[s:min(max(int(end * SR), s + SR), n)]
         v = np.asarray(pipeline._embedding(torch.from_numpy(clip)[None, None].to(device))).reshape(-1)
         return v / np.linalg.norm(v)
 
