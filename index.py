@@ -1,8 +1,11 @@
 """The meeting index: summaries and transcripts as vectors in Postgres (pgvector), with their labels.
 
+Each workspace (firm) has its own index: a Postgres schema ws_<id> with its own tables and HNSW index.
+Searches run inside one workspace; nothing is shared or mixed between firms.
+
 Only meetings whose labels you confirmed are indexed, so the client / project / person filters can be
 trusted. A meeting becomes:
-  - one row in `meetings`: workspace, date, title, type, clients, projects, people, topics
+  - one row in `meetings`: date, title, type, clients, projects, people, topics
   - rows in `passages`: each summary bullet, decision, action item and open question, and the
     transcript in passages of about a minute (with start/end time and speakers), each with an embedding
 
@@ -15,6 +18,7 @@ next to the summariser). The database runs from docker-compose.yml (./stt-lab up
                                               [--project X] [--kind action] [--since 2026-11-01] [-k 8]
     uv run index.py meeting NAME              # index one meeting now
     uv run index.py remove NAME
+    uv run index.py drop-workspace ID         # remove one firm's whole index
 """
 import argparse
 import json
@@ -28,7 +32,7 @@ import library
 import labels
 import settings
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 QUERY_INSTRUCTION = ("Instruct: Given a question about past meetings, retrieve the meeting notes and "
                      "transcript passages that answer it\nQuery: ")
 KINDS = ("summary", "decision", "action", "question", "transcript")
@@ -66,6 +70,24 @@ def embed(texts, cfg=None, query=False):
 
 
 # ---------- database ----------
+# One Postgres schema per workspace (ws_<id>), each with its own meetings and passages tables and its own
+# HNSW index: firms never share a table or a vector index, a search runs inside one workspace only, and a
+# firm's data can be dropped as a whole. public.index_info holds what all of them share (embedding model).
+def schema_of(ws):
+    if not labels.exists(ws):
+        raise IndexError_(f"no workspace {ws!r}")
+    return "ws_" + ws.replace("-", "_")  # workspace ids are [a-z0-9-], so this can't collide
+
+
+def _ws_of_schema(schema):
+    return schema[3:].replace("_", "-")
+
+
+def _sql(text, schema):
+    from psycopg import sql
+    return sql.SQL(text).format(s=sql.Identifier(schema))
+
+
 def connect(cfg=None):
     import psycopg
     from pgvector.psycopg import register_vector
@@ -83,9 +105,16 @@ def connect(cfg=None):
     return conn
 
 
+def _schemas(conn):
+    """{workspace id: schema} of the workspaces that have an index."""
+    rows = conn.execute("select schema_name from information_schema.schemata "
+                        "where schema_name like 'ws\\_%' order by 1").fetchall()
+    return {_ws_of_schema(r[0]): r[0] for r in rows}
+
+
 def _init(conn, cfg):
-    """Create the schema. The vector size comes from the embedding model; a different model needs a
-    rebuild (reset), because vectors of two models can't be compared."""
+    """Shared set-up. The vector size comes from the embedding model; another model needs a rebuild
+    (reset), because vectors of two models can't be compared."""
     with conn.transaction():
         conn.execute("create extension if not exists vector")
         conn.execute("create table if not exists index_info (key text primary key, value text not null)")
@@ -93,60 +122,79 @@ def _init(conn, cfg):
         if info and info.get("embed_model") != cfg["embed_model"]:
             raise IndexError_(f"the index was built with {info.get('embed_model')}, settings say "
                               f"{cfg['embed_model']}: run `uv run index.py reset` and then backfill")
-        if info and info.get("schema") != SCHEMA_VERSION:
-            # the index is derived data: rebuild it in the new layout; the next sync refills it
-            conn.execute("drop table if exists passages, meetings")
-            conn.execute("delete from index_info")
-            info = {}
-        if info:
+        if info and info.get("schema") == SCHEMA_VERSION:
             return
+        # first run, or an older layout: the index is derived data, so rebuild; the next sync refills it
+        conn.execute("drop table if exists public.passages, public.meetings")  # layout 1-2: one shared table
+        for schema in _schemas(conn).values():
+            conn.execute(_sql("drop schema {s} cascade", schema))
+        conn.execute("delete from index_info")
         dim = len(embed(["dimension check"], cfg)[0])
-        conn.execute("""
-            create table if not exists meetings (
-              name          text primary key,
-              workspace     text not null default '',
-              held          date,
-              title         text,
-              type          text,
-              clients       text[] not null default '{}',
-              projects      text[] not null default '{}',
-              people        text[] not null default '{}',
-              topics        text[] not null default '{}',
-              duration_s    real,
-              summary_model text,
-              labels_confirmed_at text,
-              summary_mtime double precision,
-              chunking      text,
-              label_keys    text[] not null default '{}',  -- 'client:acme', 'person:ravi': exact filters
-              indexed_at    timestamptz not null default now())""")
-        conn.execute(f"""
-            create table if not exists passages (
-              id        bigserial primary key,
-              meeting   text not null references meetings(name) on delete cascade on update cascade,
-              kind      text not null,
-              seq       int not null,
-              text      text not null,
-              owner     text,
-              due       text,
-              start_s   real,
-              end_s     real,
-              speakers  text[],
-              embedding vector({dim}) not null)""")
-        conn.execute("create index if not exists passages_embedding on passages using hnsw (embedding vector_cosine_ops)")
-        conn.execute("create index if not exists passages_meeting on passages (meeting)")
-        conn.execute("create index if not exists meetings_ws_held on meetings (workspace, held)")
-        conn.execute("create index if not exists meetings_label_keys on meetings using gin (label_keys)")
         with conn.cursor() as cur:
             cur.executemany("insert into index_info values (%s, %s)",
                             [("schema", SCHEMA_VERSION), ("embed_model", cfg["embed_model"]), ("dim", str(dim))])
 
 
+def _ensure(conn, ws):
+    """The workspace's schema, created on first use."""
+    schema = schema_of(ws)
+    dim = int(conn.execute("select value from index_info where key = 'dim'").fetchone()[0])
+    conn.execute(_sql("create schema if not exists {s}", schema))
+    conn.execute(_sql("""
+        create table if not exists {s}.meetings (
+          name          text primary key,
+          held          date,
+          title         text,
+          type          text,
+          clients       text[] not null default '{{}}',
+          projects      text[] not null default '{{}}',
+          people        text[] not null default '{{}}',
+          topics        text[] not null default '{{}}',
+          label_keys    text[] not null default '{{}}',  -- 'client:acme', 'person:ravi': exact filters
+          duration_s    real,
+          summary_model text,
+          labels_confirmed_at text,
+          summary_mtime double precision,
+          chunking      text,
+          indexed_at    timestamptz not null default now())""", schema))
+    conn.execute(_sql(f"""
+        create table if not exists {{s}}.passages (
+          id        bigserial primary key,
+          meeting   text not null references {{s}}.meetings(name) on delete cascade on update cascade,
+          kind      text not null,
+          seq       int not null,
+          text      text not null,
+          owner     text,
+          due       text,
+          start_s   real,
+          end_s     real,
+          speakers  text[],
+          embedding vector({dim}) not null)""", schema))
+    conn.execute(_sql("create index if not exists passages_embedding on {s}.passages "
+                      "using hnsw (embedding vector_cosine_ops)", schema))
+    conn.execute(_sql("create index if not exists passages_meeting on {s}.passages (meeting)", schema))
+    conn.execute(_sql("create index if not exists meetings_held on {s}.meetings (held)", schema))
+    conn.execute(_sql("create index if not exists meetings_label_keys on {s}.meetings using gin (label_keys)", schema))
+    return schema
+
+
 def reset():
-    """Drop the index (e.g. after changing the embedding model). Meetings are re-added by backfill."""
+    """Drop the whole index (e.g. after changing the embedding model). Backfill re-adds the meetings."""
     cfg = config()
     with connect(cfg) as conn, conn.transaction():
-        conn.execute("drop table if exists passages, meetings, index_info")
+        for schema in _schemas(conn).values():
+            conn.execute(_sql("drop schema {s} cascade", schema))
+        conn.execute("drop table if exists index_info")
     _ready.discard(cfg["database_url"])
+
+
+def drop_workspace(ws):
+    """Remove one workspace's index (e.g. when work with that firm ends)."""
+    with connect() as conn, conn.transaction():
+        schema = _schemas(conn).get(ws)
+        if schema:
+            conn.execute(_sql("drop schema {s} cascade", schema))
+        return bool(schema)
 
 
 # ---------- what goes in ----------
@@ -159,55 +207,83 @@ def _held(name):
 
 def _chunking(cfg):
     """Fingerprint of the chunking settings: a meeting indexed with other settings is re-indexed."""
-    return f"t{cfg['chunk_seconds']}o{cfg['chunk_overlap_seconds']}"
+    return f"t{cfg['chunk_seconds']}o{cfg['chunk_overlap_seconds']}c{cfg['chunk_max_chars']}"
 
 
 def label_key(kind, name):
     return f"{kind}:{' '.join(str(name).lower().split())}"
 
 
-def _transcript_passages(name, seconds, overlap):
-    """Windows of whole lines, each about `seconds` long, the next one starting `overlap` seconds before
-    this one ends (never mid-line, always moving forward)."""
-    lines = [ln for ln in (library.best_transcript(name) or {}).get("lines", []) if ln.get("text", "").strip()]
-    out, i = [], 0
+def _split_long(ln, max_chars):
+    """A line longer than a passage may hold is split at sentence ends (then spaces), keeping its time."""
+    text = ln["text"].strip()
+    if len(text) <= max_chars:
+        return [ln]
+    parts, cur = [], ""
+    for piece in re.split(r"(?<=[.!?])\s+", text):
+        while len(piece) > max_chars:  # one endless "sentence": cut at the last space that fits
+            cut = piece.rfind(" ", 0, max_chars) if " " in piece[:max_chars] else max_chars
+            parts.append(piece[:cut]); piece = piece[cut:].strip()
+        if cur and len(cur) + 1 + len(piece) > max_chars:
+            parts.append(cur); cur = piece
+        else:
+            cur = f"{cur} {piece}".strip()
+    if cur:
+        parts.append(cur)
+    return [{**ln, "text": p} for p in parts]
+
+
+def _transcript_passages(name, seconds, overlap, max_chars=2000, min_chars=200):
+    """Windows of whole lines, each about `seconds` long and at most `max_chars`, the next one starting
+    `overlap` seconds before this one ends (never mid-line, always moving forward). A line too long for a
+    passage is split at sentence ends; a last window under `min_chars` joins the one before it."""
+    lines = [part for ln in (library.best_transcript(name) or {}).get("lines", []) if ln.get("text", "").strip()
+             for part in _split_long(ln, max_chars)]
+    size = lambda a, b: sum(len(l["text"]) + 14 for l in lines[a:b])  # + "SPEAKER_00: " and newline
+    spans, i = [], 0
     while i < len(lines):
         j = i + 1
-        while j < len(lines) and lines[j]["start"] - lines[i]["start"] < seconds:
+        while (j < len(lines) and lines[j]["start"] - lines[i]["start"] < seconds
+               and size(i, j + 1) <= max_chars):
             j += 1
-        out.append(lines[i:j])
+        spans.append((i, j))
         if j >= len(lines):
             break
         cut = lines[j]["start"] - overlap  # the next window starts with the lines spoken in the last `overlap` s
         i = next((k for k in range(i + 1, j) if lines[k]["start"] >= cut), j)
+    if len(spans) > 1 and size(*spans[-1]) < min_chars and size(spans[-2][0], spans[-1][1]) <= max_chars:
+        spans[-2:] = [(spans[-2][0], spans[-1][1])]
     return [{"kind": "transcript", "text": "\n".join(f"{l['speaker']}: {l['text'].strip()}" for l in g),
              "start_s": g[0]["start"], "end_s": g[-1].get("end", g[-1]["start"]),
-             "speakers": sorted({l["speaker"] for l in g})} for g in out]
+             "speakers": sorted({l["speaker"] for l in g})} for g in (lines[a:b] for a, b in spans)]
 
 
 def document(name, cfg=None):
-    """The meeting row and passages for `name`, or raise if it is not ready to be indexed."""
+    """The workspace, meeting row and passages for `name`, or raise if it is not ready to be indexed."""
     cfg = cfg or config()
     library.audio_path(name)
     js = library.LLM_SUMMARIES / f"{name}.json"
     lab = labels.get(name)
+    ws = labels.of(name)
     if not js.is_file():
         raise IndexError_(f"{name} has no summary yet")
     if not lab or lab.get("status") != "confirmed":
         raise IndexError_(f"{name}: confirm its labels first (only confirmed meetings are indexed)")
+    if not ws:
+        raise IndexError_(f"{name} is in no workspace; move it to one (every workspace has its own index)")
     notes = json.loads(js.read_text())
     md = library.LLM_SUMMARIES / f"{name}.md"
     model = re.search(r"summarised by (.+?)_\n", md.read_text()) if md.is_file() else None
     t = library.best_transcript(name)
     meeting = {
-        "name": name, "workspace": library.workspace_of(name), "held": _held(name),
+        "name": name, "held": _held(name),
         "title": notes.get("title") or name, "type": lab.get("type"),
         **{f: lab.get(f, []) for f in ("clients", "projects", "people", "topics")},
+        "label_keys": [label_key(k, n) for k, f in labels.KINDS.items() for n in lab.get(f, [])],
         "duration_s": (t or {}).get("stats", {}).get("duration"),
         "summary_model": model.group(1) if model else None,
         "labels_confirmed_at": lab.get("confirmed_at"), "summary_mtime": js.stat().st_mtime,
         "chunking": _chunking(cfg),
-        "label_keys": [label_key(k, n) for k, f in labels.KINDS.items() for n in lab.get(f, [])],
     }
     passages = [{"kind": "summary", "text": s} for s in notes.get("summary", [])]
     passages += [{"kind": "decision", "text": s} for s in notes.get("decisions", [])]
@@ -215,8 +291,8 @@ def document(name, cfg=None):
                  for a in notes.get("action_items", []) if isinstance(a, dict)]
     passages += [{"kind": "question", "text": s} for s in notes.get("open_questions", [])]
     passages = [p for p in passages if isinstance(p["text"], str) and p["text"].strip()]
-    passages += _transcript_passages(name, cfg["chunk_seconds"], cfg["chunk_overlap_seconds"])
-    return meeting, passages
+    passages += _transcript_passages(name, cfg["chunk_seconds"], cfg["chunk_overlap_seconds"], cfg["chunk_max_chars"])
+    return ws, meeting, passages
 
 
 def _embed_text(meeting, p):
@@ -228,19 +304,21 @@ def _embed_text(meeting, p):
 
 
 def index_one(name):
-    """(Re)index one meeting. Returns the number of passages."""
+    """(Re)index one meeting in its workspace's index (and out of any other). Returns the passage count."""
     cfg = config()
-    meeting, passages = document(name, cfg)
+    ws, meeting, passages = document(name, cfg)
     vectors = embed([_embed_text(meeting, p) for p in passages], cfg)
     cols = list(meeting)
     with connect(cfg) as conn, conn.transaction():
-        conn.execute("delete from meetings where name = %s", (name,))
-        conn.execute(f"insert into meetings ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})",
-                     [meeting[c] for c in cols])
+        for other in _schemas(conn).values():  # it may have moved from another workspace
+            conn.execute(_sql("delete from {s}.meetings where name = %s", other), (name,))
+        schema = _ensure(conn, ws)
+        conn.execute(_sql(f"insert into {{s}}.meetings ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})",
+                          schema), [meeting[c] for c in cols])
         with conn.cursor() as cur:
             cur.executemany(
-                "insert into passages (meeting, kind, seq, text, owner, due, start_s, end_s, speakers, embedding)"
-                " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                _sql("insert into {s}.passages (meeting, kind, seq, text, owner, due, start_s, end_s, speakers,"
+                     " embedding) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", schema),
                 [(name, p["kind"], i, p["text"], p.get("owner"), p.get("due"), p.get("start_s"), p.get("end_s"),
                   p.get("speakers"), _vec(v)) for i, (p, v) in enumerate(zip(passages, vectors))])
     return len(passages)
@@ -251,44 +329,50 @@ def _vec(v):
     return np.array(v, dtype=np.float32)
 
 
-def remove(name):
+def remove(name, ws=None):
+    """Take a meeting out of the index (of `ws` only, or of every workspace)."""
     with connect() as conn, conn.transaction():
-        return conn.execute("delete from meetings where name = %s", (name,)).rowcount
-
-
-def rename(old, new):
-    with connect() as conn, conn.transaction():
-        conn.execute("update meetings set name = %s where name = %s", (new, old))
-
-
-def set_workspace(names, ws):
-    with connect() as conn, conn.transaction():
-        conn.execute("update meetings set workspace = %s where name = any(%s)", (ws or "", list(names)))
+        schemas = _schemas(conn)
+        targets = [schemas[ws]] if ws else list(schemas.values())
+        return sum(conn.execute(_sql("delete from {s}.meetings where name = %s", s), (name,)).rowcount
+                   for s in targets if s)
 
 
 # ---------- what needs doing ----------
 def pending():
-    """Confirmed meetings (not in Trash) that are missing from the index or changed since: new labels,
-    a new summary. And indexed meetings that should not be there any more."""
+    """(to index, to remove, unplaced): confirmed meetings (not in Trash) missing from their workspace's
+    index or changed since (labels, summary, chunking settings); indexed (workspace, meeting) pairs that
+    should not be there (Trash, moved to another workspace, labels reopened); confirmed meetings in no
+    workspace, which are not indexed."""
+    have = {}
     with connect() as conn:
-        have = {r[0]: (r[1], r[2], r[3]) for r in conn.execute(
-            "select name, labels_confirmed_at, summary_mtime, chunking from meetings").fetchall()}
+        for ws, schema in _schemas(conn).items():
+            for r in conn.execute(_sql("select name, labels_confirmed_at, summary_mtime, chunking from {s}.meetings",
+                                       schema)).fetchall():
+                have[(ws, r[0])] = (r[1], r[2], r[3])
     chunking = _chunking(config())
-    todo, ready = [], set()
+    todo, ready, unplaced = [], set(), []
     for it in library.items():
         if it["folder"] == "trash" or not it["summary"] or it["labels"] != "confirmed":
             continue
-        ready.add(it["name"])
+        ws = labels.of(it["name"])
+        if not ws:
+            unplaced.append(it["name"])
+            continue
+        ready.add((ws, it["name"]))
         lab = labels.get(it["name"])
         mtime = (library.LLM_SUMMARIES / f"{it['name']}.json").stat().st_mtime
-        if have.get(it["name"]) != (lab.get("confirmed_at"), mtime, chunking):
+        if have.get((ws, it["name"])) != (lab.get("confirmed_at"), mtime, chunking):
             todo.append(it["name"])
-    return todo, sorted(set(have) - ready)
+    return todo, sorted(set(have) - ready), unplaced
 
 
 def sync(log=print):
     """Index what is pending and drop what should not be indexed. Returns (indexed, removed, failed)."""
-    todo, stale = pending()
+    todo, stale, _ = pending()
+    for ws, name in stale:  # first, so a meeting moved between workspaces is never in two
+        remove(name, ws)
+        log(f"- {name}: removed from {ws} (Trash, another workspace, or labels no longer confirmed)")
     done, failed = 0, []
     for name in todo:
         try:
@@ -298,9 +382,6 @@ def sync(log=print):
         except Exception as e:
             failed.append(name)
             log(f"✗ {name}: {type(e).__name__}: {e}")
-    for name in stale:
-        remove(name)
-        log(f"- {name}: removed (in Trash, or its labels are no longer confirmed)")
     return done, len(stale), failed
 
 
@@ -308,33 +389,33 @@ def status():
     cfg = config()
     out = {"enabled": cfg["enabled"], "embed_model": cfg["embed_model"], "ok": False}
     try:
-        todo, stale = pending()
+        todo, stale, unplaced = pending()
         with connect(cfg) as conn:
-            out.update(ok=True,
-                       meetings=conn.execute("select count(*) from meetings").fetchone()[0],
-                       passages=conn.execute("select count(*) from passages").fetchone()[0],
-                       by_workspace=dict(conn.execute(
-                           "select workspace, count(*) from meetings group by workspace").fetchall()),
-                       pending=todo, stale=stale)
+            by_ws = {ws: {"meetings": conn.execute(_sql("select count(*) from {s}.meetings", s)).fetchone()[0],
+                          "passages": conn.execute(_sql("select count(*) from {s}.passages", s)).fetchone()[0]}
+                     for ws, s in _schemas(conn).items()}
+        out.update(ok=True, by_workspace=by_ws, pending=todo, stale=stale, unplaced=unplaced,
+                   meetings=sum(v["meetings"] for v in by_ws.values()),
+                   passages=sum(v["passages"] for v in by_ws.values()))
     except Exception as e:
         out["message"] = str(e)
     return out
 
 
 # ---------- search ----------
-def search(q, workspace=None, client=None, project=None, person=None, kind=None, since=None, until=None,
-           k=8):
-    """Passages closest in meaning to `q`, best first, filtered by labels and dates."""
+def search(q, workspace, client=None, project=None, person=None, kind=None, since=None, until=None, k=8):
+    """Passages of one workspace closest in meaning to `q`, best first, filtered by labels and dates.
+    There is no search across workspaces: each firm's meetings stay in their own index."""
+    if not workspace:
+        raise IndexError_("choose a workspace: each workspace has its own index")
+    schema_of(workspace)  # must be a real workspace
     where, args, keys = [], [], []
-    reg = labels.load(workspace) if workspace and labels.exists(workspace) else None
+    reg = labels.load(workspace)
     for ent, val in (("client", client), ("project", project), ("person", person)):
         if val:  # a misheard or differently written name finds the registry entry it belongs to
-            canonical = labels.resolve(reg, ent, val)[0] if reg else None
-            keys.append(label_key(ent, canonical or val))
+            keys.append(label_key(ent, labels.resolve(reg, ent, val)[0] or val))
     if keys:
         where.append("m.label_keys @> %s"); args.append(keys)  # uses the GIN index
-    if workspace is not None:
-        where.append("m.workspace = %s"); args.append(workspace)
     if kind:
         kinds = [kind] if isinstance(kind, str) else list(kind)
         if set(kinds) - set(KINDS):
@@ -344,25 +425,30 @@ def search(q, workspace=None, client=None, project=None, person=None, kind=None,
         where.append("m.held >= %s"); args.append(date.fromisoformat(str(since)))
     if until:
         where.append("m.held <= %s"); args.append(date.fromisoformat(str(until)))
+    with connect() as conn:
+        schema = _schemas(conn).get(workspace)
+    if not schema:
+        return []  # nothing confirmed in this workspace yet
     vec = _vec(embed([q], query=True)[0])
     # With filters, HNSW alone finds the ef_search nearest passages and filters afterwards, which can leave
     # fewer than k. Iterative scan keeps walking the graph until k rows pass the filters; its relaxed
     # order is put right by the outer sort.
-    sql = f"""
+    query = _sql(f"""
         with hits as materialized (
-          select m.name, m.title, m.held, m.workspace, m.type, m.clients, m.projects, m.people,
+          select m.name, m.title, m.held, m.type, m.clients, m.projects, m.people,
                  p.kind, p.text, p.owner, p.due, p.start_s, p.end_s, p.embedding <=> %s as distance
-          from passages p join meetings m on m.name = p.meeting
+          from {{s}}.passages p join {{s}}.meetings m on m.name = p.meeting
           {"where " + " and ".join(where) if where else ""}
           order by p.embedding <=> %s limit %s)
-        select *, 1 - distance as score from hits order by distance"""
+        select *, 1 - distance as score from hits order by distance""", schema)
     with connect() as conn, conn.transaction():
         conn.execute("set local hnsw.ef_search = 100")
         conn.execute("set local hnsw.iterative_scan = relaxed_order")
-        cur = conn.execute(sql, [vec, *args, vec, int(k)])
+        cur = conn.execute(query, [vec, *args, vec, int(k)])
         cols = [c.name for c in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     for r in rows:
+        r["workspace"] = workspace
         r["held"] = r["held"].isoformat() if r["held"] else None
         r["score"] = round(float(r.pop("score")), 3)
         r.pop("distance", None)
@@ -375,7 +461,8 @@ def _fmt_time(s):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["status", "backfill", "search", "meeting", "remove", "reset"])
+    p.add_argument("command", choices=["status", "backfill", "search", "meeting", "remove", "reset",
+                                        "drop-workspace"])
     p.add_argument("args", nargs="*")
     p.add_argument("--workspace"); p.add_argument("--client"); p.add_argument("--project")
     p.add_argument("--person"); p.add_argument("--kind"); p.add_argument("--since"); p.add_argument("--until")
@@ -387,7 +474,7 @@ def main():
         done, removed, failed = sync()
         print(f"indexed {done}, removed {removed}, failed {len(failed)}")
     elif a.command == "search":
-        for r in search(" ".join(a.args), a.workspace, a.client, a.project, a.person, a.kind, a.since, a.until, a.k):
+        for r in search(" ".join(a.args), a.workspace or labels.active(), a.client, a.project, a.person, a.kind, a.since, a.until, a.k):
             where = f" @ {_fmt_time(r['start_s'])}" if r["kind"] == "transcript" else ""
             owner = f" [{r['owner']}]" if r["owner"] else ""
             print(f"{r['score']:.3f}  {r['held']}  {r['title']}  · {r['kind']}{owner}{where}")
@@ -398,6 +485,9 @@ def main():
     elif a.command == "remove":
         for name in a.args:
             print(f"{name}: {'removed' if remove(name) else 'not indexed'}")
+    elif a.command == "drop-workspace":
+        for ws in a.args:
+            print(f"{ws}: {'index dropped' if drop_workspace(ws) else 'had no index'}")
     elif a.command == "reset":
         reset()
         print("index dropped; run `uv run index.py backfill`")

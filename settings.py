@@ -45,6 +45,7 @@ DEFAULTS = {
         "embed_url": "http://127.0.0.1:11434",  # Ollama's native API
         "embed_model": "qwen3-embedding:0.6b",
         "chunk_seconds": 60,       # transcript passages of about a minute
+        "chunk_max_chars": 2000,   # a dense minute is cut earlier; an over-long line is split at sentences
         "chunk_overlap_seconds": 15,  # each passage repeats the end of the one before, so an exchange
                                       # across a boundary is whole in at least one of them
     },

@@ -1323,12 +1323,19 @@ async function loadIndexSettings() {
   const s = await api("/api/index/status").catch((e) => ({ ok: false, message: e.message }));
   const last = s.last_sync ? (s.last_sync.error ? ` · last sync failed: ${esc(s.last_sync.error)}`
     : ` · last sync ${esc(s.last_sync.at.replace("T", " "))}`) : "";
+  const wsName = (w) => workspaces.find((x) => x.id === w)?.name || w;
   $("idxStatus").innerHTML = !s.ok
     ? `<p class="warn">${esc(s.message || "index not available")}</p><p class="hint">Start the database with <code>./stt-lab up</code>.</p>`
-    : `<p><span class="chip ok">ready</span> ${s.meetings} meeting(s), ${s.passages} passages · embeddings: ${esc(s.embed_model)}${last}</p>
-       <p class="hint">${Object.entries(s.by_workspace).map(([w, n]) => `${esc(workspaces.find((x) => x.id === w)?.name || w || "no workspace")}: ${n}`).join(" · ") || "Nothing indexed yet."}
-       ${s.pending.length ? ` · <b>${s.pending.length} waiting</b>${s.syncing ? " (indexing…)" : ""}` : ""}</p>
-       <button id="idxSync">Index now</button>`;
+    : `<p><span class="chip ok">ready</span> embeddings: ${esc(s.embed_model)}${last}</p>
+       <table class="reg" style="width:auto;min-width:360px"><tr><th>Workspace (own index)</th><th>Meetings</th><th>Passages</th></tr>` +
+      (Object.entries(s.by_workspace).map(([w, n]) => `<tr><td>${esc(wsName(w))}</td><td>${n.meetings}</td><td>${n.passages}</td></tr>`).join("")
+        || '<tr><td colspan="3" class="meta">Nothing indexed yet.</td></tr>') + `</table>
+       <p class="hint">${s.pending.length ? `<b>${s.pending.length} meeting(s) waiting</b>${s.syncing ? " (indexing…)" : ""}. ` : "Up to date. "}
+         ${s.unplaced?.length ? `${s.unplaced.length} confirmed meeting(s) are in no workspace and not indexed. ` : ""}</p>
+       <div class="setting"><div class="what"><b>Sync now</b><p class="hint">The index normally updates itself when you
+         confirm labels, move, rename or delete a meeting. Use this if the database or Ollama was down at the time, or after
+         changing a summary outside the app: it adds new or changed confirmed meetings and removes those in Trash. Nothing
+         unchanged is re-embedded.</p></div><button id="idxSync">Sync now</button></div>`;
   if ($("idxSync")) $("idxSync").onclick = async () => { await api("/api/index/sync", {}); setTimeout(loadIndexSettings, 1500); };
 }
 async function runIndexSearch() {

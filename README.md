@@ -216,13 +216,18 @@ Labels are stored in `llm/labels/<recording>.json` and are covered by the Manage
 
 Confirmed meetings are indexed for search by meaning, the base for the MCP server.
 
+- **One index per workspace.** Each firm's meetings live in their own Postgres schema (`ws_<id>`) with their
+  own tables and HNSW index; nothing is shared or mixed, a search runs inside one workspace, and a firm's
+  index can be dropped as a whole (`uv run index.py drop-workspace ID`). Moving a meeting to another
+  workspace moves its vectors; confirmed meetings in no workspace are not indexed.
 - **Database:** `docker-compose.yml` runs `pgvector/pgvector` on `127.0.0.1:5433` (this Mac only), data in
   the `stt-lab-pgdata` volume. Settings "index" section, or `STT_DB_URL`, points elsewhere.
 - **Embeddings:** `qwen3-embedding:0.6b` in Ollama (0.6 GB, fits next to the summariser; `./stt-lab up`
   pulls it once). A meeting embeds in a few seconds.
 - **What is stored:** a `meetings` row (workspace, date, title, type, clients, projects, people, topics) and
   `passages`: each summary point, decision, action item (with owner and due date) and open question, and
-  the transcript in one-minute passages (whole lines, each starting ~15 s before the previous one ends,
+  the transcript in one-minute passages, at most 2000 characters (whole lines; an over-long line is split
+  at sentence ends, each starting ~15 s before the previous one ends,
   so an exchange across a boundary stays whole) with start time and speakers. Each passage is embedded with
   its meeting's title, date, clients and projects in front, so short points keep their context.
 - **Index:** HNSW (cosine) on the embeddings with iterative scan, so a filtered search still returns the
@@ -231,7 +236,10 @@ Confirmed meetings are indexed for search by meaning, the base for the MCP serve
   chunking settings re-indexes meetings on the next sync.
 - **Only confirmed meetings**, so the label filters can be trusted. The index follows the library: confirm,
   move, rename, delete and new summaries trigger a sync that re-embeds only what changed; Trash is removed.
-- **Settings → Search index** shows what is indexed and has a search box to try it.
+- **Settings → Search index** shows each workspace's index and has a search box to try it. **Sync now**
+  is only needed if the database or Ollama was down when something changed (or a summary was changed
+  outside the app, e.g. `--respell`): it indexes new or changed confirmed meetings and removes those in
+  Trash, without re-embedding anything unchanged.
 
 ```bash
 uv run index.py status
