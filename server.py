@@ -24,6 +24,7 @@ from faster_whisper.audio import decode_audio
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 import library
+import settings
 import summarise
 import transcribe
 from library import AUDIO_EXT, RECORDINGS, TRANSCRIPTS, LibraryError
@@ -46,6 +47,7 @@ busy = set()  # recordings being transcribed right now: not renamable or deletab
 
 
 @app.exception_handler(LibraryError)
+@app.exception_handler(settings.SettingsError)
 def library_error(_, e):
     return JSONResponse({"detail": str(e)}, status_code=400)
 
@@ -393,7 +395,63 @@ def library_summary(name: str):
 @app.get("/api/llm/status")
 def llm_status():
     # a recording being auto-summarised is still in the inbox; don't offer it for a second run
-    return {**summarise.check(), "queued": [n for n in summarise.queued() if n not in busy]}
+    return {**summarise.check(), "models": summarise.models(),
+            "queued": [n for n in summarise.queued() if n not in busy]}
+
+
+# ---------- Settings tab ----------
+@app.get("/api/settings")
+def settings_get():
+    return settings.current()
+
+
+@app.post("/api/settings")
+def settings_set(changes: dict = Body(embed=True)):
+    """Save {section: {key: value}}; the summariser model must be one the LLM server has."""
+    model = changes.get("llm", {}).get("model")
+    if model is not None and model not in summarise.models():
+        raise HTTPException(400, f"model {model!r} is not available")
+    return settings.update(changes)
+
+
+@app.get("/api/llm/models")
+def llm_models():
+    """Chat models with their context sizes, for the Settings tab's model picker."""
+    return {"models": summarise.model_details(), "current": summarise.config()["model"],
+            "needed_ctx": summarise.SUMMARY_CTX}
+
+
+@app.post("/api/llm/create-32k")
+def llm_create_32k(model: str = Body(embed=True)):
+    """Make a 32k-context copy of a model (same weights, nothing downloaded)."""
+    return {"model": summarise.create_32k(model)}
+
+
+@app.get("/api/llm/compare/{name}")
+def llm_comparisons(name: str):
+    return summarise.comparisons(name)
+
+
+@app.post("/api/llm/compare")
+async def llm_compare(name: str = Body(), models: list[str] = Body()):
+    """Summarise one recording with each model in turn, into llm/compare/ (the real summary is untouched).
+    Each model runs alone, after the others are unloaded, so its memory figure is its own."""
+    available = summarise.models()
+    if missing := [m for m in models if m not in available]:
+        raise HTTPException(400, f"not available: {', '.join(missing)}")
+    _not_busy([name])
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(worker, release_models)
+    results = []
+    for model in models:
+        try:
+            await loop.run_in_executor(worker, summarise.unload_all)
+            notes = await loop.run_in_executor(worker, summarise.compare_one, name, model)
+            results.append({"model": model, "ok": True, "seconds": notes["_meta"]["seconds"]})
+        except Exception as e:
+            results.append({"model": model, "ok": False, "error": f"{type(e).__name__}: {e}"})
+    await loop.run_in_executor(worker, summarise.unload_all)
+    return {"results": results}
 
 
 @app.post("/api/llm/summarise")

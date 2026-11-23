@@ -115,12 +115,44 @@ td.acts button { padding: 3px 8px; font-size: 12px; }
 #detail h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 #detail ul { margin: 0; padding-left: 20px; }
 #detail .meta { color: var(--muted); font-size: 12px; }
+#viewSettings { grid-template-columns: 220px 1fr; }
+#cfgNav .f { padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+#cfgNav .f:hover { background: var(--bg); }
+#cfgNav .f.sel { background: var(--active); color: var(--accent); font-weight: 600; }
+.settings { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
+.settings[hidden] { display: none; }
+.settings .panel > p.hint:first-of-type { margin-top: -4px; }
+.settings h3 { margin: 14px 0 2px; font-size: 14px; }
+.settings h3 .tag { margin-left: 6px; font-weight: 400; }
+.setting { display: flex; gap: 14px; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--border); }
+.setting:first-of-type { border-top: none; }
+.setting .what { min-width: 0; }
+.setting .what b { font-weight: 500; }
+.setting .what .hint { margin: 2px 0 0; }
+table.models { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+table.models th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+table.models td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.models tr.cur td { background: var(--active); }
+table.models td:last-child { text-align: right; white-space: nowrap; }
+table.models button { padding: 3px 9px; font-size: 12px; }
+.warn { color: var(--danger); }
+#savedNote { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .3s; margin-left: 8px; }
+#savedNote.on { opacity: 1; }
+.cfgline { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.cfgline a { color: var(--accent); cursor: pointer; }
+.cmp { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border, #8884); }
+.cmp .picks { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 6px 0 10px; font-size: 13px; }
+.cmp .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.cmp .col { border: 1px solid var(--border, #8884); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.cmp .col h5 { margin: 0 0 4px; font-size: 14px; }
+.cmp .stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; margin: 6px 0; }
+.cmp .stats span:nth-child(odd) { color: var(--muted); }
 button.danger { color: var(--danger); border-color: var(--danger); }
 </style>
 </head>
 <body>
 <header><h1>Meeting Transcribe Lab</h1><span>mlx-whisper + pyannote · runs locally</span>
-  <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button></nav>
+  <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button><button data-view="viewSettings">Settings</button></nav>
 </header>
 <main id="viewTranscribe">
   <aside>
@@ -135,9 +167,8 @@ button.danger { color: var(--danger); border-color: var(--danger); }
         <label>Source <select id="recSource">
           <option value="mic" selected>Microphone</option><option value="tab">Browser tab</option></select></label>
         <button class="rec" id="recBtn">● Record</button>
-        <label title="Transcribe while recording; speakers are labelled when you stop"><input type="checkbox" id="liveMode" checked> Live transcript</label>
-        <label title="When the recording is transcribed and speakers are labelled, summarise it with the LLM and file it under Summarised"><input type="checkbox" id="autoSum" checked> Auto-summarise</label>
       </div>
+      <div class="cfgline" id="recCfg"></div>
       <div id="recState"><span class="dot"></span><span id="recTime">0:00</span><div id="meter"><div></div></div><button id="recStop">Stop</button></div>
       <details id="ytBox" style="margin-top:10px">
         <summary class="hint" style="cursor:pointer;margin:0">Test with a YouTube video</summary>
@@ -204,6 +235,55 @@ button.danger { color: var(--danger); border-color: var(--danger); }
       <div id="tableWrap" style="margin-top:10px"></div>
     </div>
     <div class="panel" id="detail"><div class="empty">Select a recording to see its details and summary.</div></div>
+  </section>
+</main>
+
+<main id="viewSettings" hidden>
+  <aside>
+    <div class="panel">
+      <h2>Settings <span id="savedNote">Saved</span></h2>
+      <div id="cfgNav">
+        <div class="f sel" data-pane="cfgTranscribe">Transcription</div>
+        <div class="f" data-pane="cfgSummariser">Summariser</div>
+      </div>
+    </div>
+  </aside>
+
+  <section class="settings" id="cfgTranscribe">
+    <div class="panel">
+      <h2>Recording</h2>
+      <div class="setting"><div class="what"><b>Live transcript</b>
+        <p class="hint">Transcribe while recording. Speakers are labelled when you stop. Off: record first, transcribe after.</p></div>
+        <input type="checkbox" data-set="recording.live_transcript"></div>
+      <div class="setting"><div class="what"><b>Auto-summarise</b>
+        <p class="hint">When a recording is transcribed and speakers are labelled, summarise it and file it under Summarised.</p></div>
+        <input type="checkbox" data-set="recording.auto_summarise"></div>
+    </div>
+    <div class="panel">
+      <h2>Transcription defaults</h2>
+      <p class="hint">Starting values of the Transcribe tab’s controls; you can still change them per recording there.</p>
+      <div class="setting"><div class="what"><b>Spoken language</b></div>
+        <select data-set="transcription.language"><option value="">auto (per chunk)</option><option value="en">English</option><option value="hi">Hindi</option></select></div>
+      <div class="setting"><div class="what"><b>Output</b></div>
+        <select data-set="transcription.task"><option value="translate">English</option><option value="transcribe">As spoken</option></select></div>
+      <div class="setting"><div class="what"><b>Speakers</b><p class="hint">0 = detect automatically</p></div>
+        <input type="number" min="0" max="20" style="width:70px" data-set="transcription.speakers"></div>
+    </div>
+  </section>
+
+  <section class="settings" id="cfgSummariser" hidden>
+    <div class="panel">
+      <h2>Summariser model</h2>
+      <p class="hint" id="llmServer"></p>
+      <div id="modelTable"><p class="meta">Loading models…</p></div>
+    </div>
+    <div class="panel">
+      <h2>Memory</h2>
+      <div class="setting"><div class="what"><b>Free memory after each summary</b>
+        <p class="hint">Unload the model as soon as a summary is written, instead of Ollama keeping it for 5 minutes.
+          Costs a few seconds of loading per summary.</p></div>
+        <input type="checkbox" data-set="llm.unload_after_summary"></div>
+    </div>
   </section>
 </main>
 
@@ -439,10 +519,10 @@ function startMeter(ctx, source) {
     $("meter").firstElementChild.style.width = Math.min(100, peak / 128 * 140) + "%";
     $("recTime").textContent = fmt((Date.now() - started) / 1000);
   }, 100);
-  $("recState").classList.add("on"); $("recBtn").disabled = $("recSource").disabled = $("liveMode").disabled = $("recName").disabled = $("autoSum").disabled = true;
+  $("recState").classList.add("on"); $("recBtn").disabled = $("recSource").disabled = $("recName").disabled = true;
   return () => {
     clearInterval(tick);
-    $("recState").classList.remove("on"); $("recBtn").disabled = $("recSource").disabled = $("liveMode").disabled = $("recName").disabled = $("autoSum").disabled = false;
+    $("recState").classList.remove("on"); $("recBtn").disabled = $("recSource").disabled = $("recName").disabled = false;
   };
 }
 
@@ -474,7 +554,7 @@ async function startRecording(fromTab) {
     const name = await upload(new Blob(chunks, { type: mr.mimeType }), `${recPrefix(`rec-${fromTab ? "tab" : "mic"}`)}-${localStamp()}.${ext}`);
     if (!name) return;
     await loadList(); await selectRecording(name);
-    if ($("autoSum").checked) transcribe({ auto: true });  // workflow: transcribe + speakers → summary → Summarised
+    if (cfg.recording.auto_summarise) transcribe({ auto: true });  // workflow: transcribe + speakers → summary → Summarised
     else setStatus("Recording saved. Press play to review, or Transcribe.");
   };
   // Stop if the user ends sharing from Chrome's own "Stop sharing" bar.
@@ -523,8 +603,8 @@ async function startLive(fromTab) {
 
   const q = new URLSearchParams({ model: $("model").value, lang: $("lang").value, task: $("task").value,
                                   speakers: $("speakers").value || 0, source: fromTab ? "tab" : "mic",
-                                  prefix: recPrefix(""), auto: $("autoSum").checked ? 1 : 0 });
-  const auto = $("autoSum").checked;
+                                  prefix: recPrefix(""), auto: cfg.recording.auto_summarise ? 1 : 0 });
+  const auto = cfg.recording.auto_summarise;
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/live?${q}`);
   const queued = [];
   ws.onopen = () => { queued.forEach((b) => ws.send(b)); queued.length = 0; };
@@ -587,7 +667,7 @@ async function startLive(fromTab) {
   ws.onclose = () => { if (!stopping) { setStatus("Lost connection to the server", true); stop(); } };
 }
 
-$("recBtn").onclick = () => ($("liveMode").checked ? startLive : startRecording)($("recSource").value === "tab");
+$("recBtn").onclick = () => (cfg.recording.live_transcript ? startLive : startRecording)($("recSource").value === "tab");
 $("recStop").onclick = () => rec && rec.stop();
 
 // ---------- tabs ----------
@@ -595,7 +675,7 @@ document.querySelectorAll("nav.tabs button").forEach((b) => b.onclick = () => sh
 function showView(id) {
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === id));
   document.querySelectorAll("main").forEach((m) => (m.hidden = m.id !== id));
-  if (id === "viewManage") { loadLibrary(); loadLlm(); } else loadList();
+  if (id === "viewManage") { loadLibrary(); loadLlm(); } else if (id === "viewSettings") loadSettings(); else loadList();
 }
 
 // ---------- manage ----------
@@ -760,7 +840,7 @@ async function renderDetail() {
     : it.summary ? "<p class='meta'>Loading summary…</p>"
     : "<p class='meta'>No summary yet. Move it to “To summarise” to queue it for the LLM.</p>";
   $("detail").innerHTML = `<h3>${esc(it.name)}</h3><div class="meta">${esc(meta)}</div>${body}`;
-  if (!it.summary) return;
+  if (!it.summary) return renderCompare(it);
   try {
     const { data, markdown } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
     if (focus !== it.name) return;
@@ -774,14 +854,68 @@ async function renderDetail() {
             : `<pre style="white-space:pre-wrap">${esc(markdown)}</pre>`);
     $("copySummary").onclick = (e) => copyText(markdown, e.currentTarget);
   } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
+  renderCompare(it);
+}
+
+// ---- compare models: the same transcript through several local models, side by side ----
+let llm = { models: [] }, comparing = null;
+async function renderCompare(it) {
+  if (!it.queued && !it.summary) return;
+  const runs = await api(`/api/llm/compare/${encodeURIComponent(it.name)}`).catch(() => []);
+  if (focus !== it.name) return;
+  const done = new Set(runs.map((r) => r._meta?.model));
+  const busyHere = comparing === it.name;
+  const picks = llm.models.map((m) => `<label><input type="checkbox" value="${esc(m)}" ${done.has(m) || m === llm.model ? "checked" : ""}
+      ${busyHere ? "disabled" : ""}> ${esc(m)}</label>`).join("");
+  const n = (x) => x == null ? "—" : x;
+  const list = (xs) => xs?.length ? `<ul>${xs.map((x) => `<li>${esc(String(x))}</li>`).join("")}</ul>` : "<p class='meta'>None.</p>";
+  const col = (r) => {
+    const m = r._meta || {}, u = m.usage || {}, mem = m.memory;
+    return `<div class="col"><h5>${esc(m.model || "?")}</h5>
+      <div class="stats">
+        <span>Time</span><span>${n(m.seconds)} s</span>
+        <span>Speed</span><span>${n(m.tokens_per_s)} tok/s out</span>
+        <span>Tokens</span><span>${n(u.prompt_tokens)} in · ${n(u.completion_tokens)} out</span>
+        <span>Memory</span><span>${mem ? `${mem.total_gb} GB (${mem.gpu_gb} GB GPU)${mem.context ? ` · ctx ${mem.context}` : ""}` : "n/a"}</span>
+        <span>Found</span><span>${(r.summary || []).length} points · ${(r.decisions || []).length} decisions ·
+          ${(r.action_items || []).length} actions · ${(r.open_questions || []).length} questions</span>
+      </div>
+      <b>${esc(r.title || "")}</b>
+      <h4>Summary</h4>${list(r.summary)}<h4>Decisions</h4>${list(r.decisions)}
+      <h4>Action items</h4>${list((r.action_items || []).map((a) => `${a.owner || "unassigned"}: ${a.task}${a.due ? ` (due ${a.due})` : ""}`))}
+      <h4>Open questions</h4>${list(r.open_questions)}</div>`;
+  };
+  $("detail").querySelector(".cmp")?.remove();
+  $("detail").insertAdjacentHTML("beforeend", `<div class="cmp"><h4>Compare models</h4>
+    ${llm.models.length ? `<div class="picks">${picks}<button id="cmpRun" class="primary" ${busyHere || comparing ? "disabled" : ""}>
+      ${busyHere ? "Running… (each model 1–3 min)" : "Run comparison"}</button></div>` : "<p class='meta'>No LLM models available.</p>"}
+    <p class="meta">Each model runs alone (others unloaded), so memory is what that model needs. Test summaries are kept in
+      llm/compare/; the recording’s real summary is not changed.</p>
+    ${runs.length ? `<div class="cols">${runs.map(col).join("")}</div>` : ""}</div>`);
+  const btn = $("cmpRun");
+  if (btn) btn.onclick = async () => {
+    const models = [...$("detail").querySelectorAll(".cmp .picks input:checked")].map((c) => c.value);
+    if (!models.length) return alert("Pick at least one model.");
+    comparing = it.name; renderCompare(it);
+    try {
+      const { results } = await api("/api/llm/compare", { name: it.name, models });
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length) alert(failed.map((r) => `${r.model}: ${r.error}`).join("\n"));
+    } catch (e) { alert(e.message); }
+    comparing = null;
+    if (focus === it.name) renderCompare(it);
+  };
 }
 
 async function loadLlm() {
-  const s = await api("/api/llm/status").catch((e) => ({ ok: false, message: e.message, queued: [] }));
+  const s = await api("/api/llm/status").catch((e) => ({ ok: false, message: e.message, queued: [], models: [] }));
+  llm = s;
   $("llmChip").className = "chip " + (s.ok ? "ok" : "bad");
   $("llmChip").textContent = s.ok ? `${s.model} ready` : "LLM not connected";
-  $("llmMsg").textContent = s.ok ? `${s.queued.length} transcript(s) queued.` :
-    `${s.message}. Queued transcripts wait in llm/inbox/ until it is available.`;
+  $("llmMsg").innerHTML = esc(s.ok ? `${s.queued.length} transcript(s) queued.` :
+    `${s.message}. Queued transcripts wait in llm/inbox/ until it is available.`) +
+    ' <a class="cfglink" style="color:var(--accent);cursor:pointer">Change model in Settings</a>';
+  $("llmMsg").querySelector(".cfglink").onclick = () => showView("viewSettings");
   $("llmRun").textContent = `Summarise queued (${s.queued.length})`;
   $("llmRun").disabled = !s.ok || !s.queued.length;
   $("llmRun").onclick = () => act(async () => {
@@ -792,6 +926,103 @@ async function loadLlm() {
   });
 }
 
+// ---------- settings ----------
+let cfg = { recording: { live_transcript: true, auto_summarise: true }, transcription: { language: "", task: "translate", speakers: 0 }, llm: {} };
+
+function applySettings() {  // reflect settings in the other tabs
+  const r = cfg.recording, on = (b) => b ? "on" : "off";
+  $("recCfg").innerHTML = `Live transcript: ${on(r.live_transcript)} · Auto-summarise: ${on(r.auto_summarise)} · <a>Change in Settings</a>`;
+  $("recCfg").querySelector("a").onclick = () => showView("viewSettings");
+}
+async function initSettings() {
+  cfg = await api("/api/settings").catch(() => cfg);
+  const t = cfg.transcription;  // starting values for this page's transcription controls
+  $("lang").value = t.language; $("task").value = t.task; $("speakers").value = t.speakers;
+  applySettings();
+}
+async function saveSetting(section, key, value) {
+  try {
+    cfg = await api("/api/settings", { changes: { [section]: { [key]: value } } });
+    applySettings();
+    $("savedNote").classList.add("on"); setTimeout(() => $("savedNote").classList.remove("on"), 1200);
+  } catch (e) { alert(e.message); loadSettings(); }
+}
+document.querySelectorAll("[data-set]").forEach((el) => el.onchange = () => {
+  const [section, key] = el.dataset.set.split(".");
+  saveSetting(section, key, el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) || 0 : el.value);
+});
+
+let cfgPane = "cfgTranscribe";  // Transcription is the first and default section
+document.querySelectorAll("#cfgNav .f").forEach((f) => f.onclick = () => { cfgPane = f.dataset.pane; loadSettings(); });
+
+// Why a model needs a 32k context, shown before anyone picks a smaller one.
+const why32k = (x, k, mins) =>
+  `${x.name} has a ${k(x.ctx)}-token context, which holds only about ${mins} minutes of meeting.\n\n` +
+  "Why 32k is needed: the whole transcript and the instructions must fit in the model's context at once. " +
+  "A meeting uses about 450 tokens per minute, so a 32k context covers ~73 minutes. With a smaller context, " +
+  "Ollama silently drops the start of longer transcripts; the summariser then stops with an " +
+  "\"input truncated\" error and the meeting stays unsummarised.\n\nUse it anyway?";
+
+async function loadSettings() {
+  document.querySelectorAll("#cfgNav .f").forEach((f) => f.classList.toggle("sel", f.dataset.pane === cfgPane));
+  document.querySelectorAll("#viewSettings .settings").forEach((p) => (p.hidden = p.id !== cfgPane));
+  cfg = await api("/api/settings").catch(() => cfg);
+  document.querySelectorAll("[data-set]").forEach((el) => {
+    const [section, key] = el.dataset.set.split(".");
+    if (el.type === "checkbox") el.checked = cfg[section][key]; else el.value = cfg[section][key];
+  });
+  if (cfgPane !== "cfgSummariser") return;
+  $("llmServer").textContent = `LLM server: ${cfg.llm.base_url}. The model in use writes every summary, manual and auto-summarise.`;
+  const box = $("modelTable");
+  let m;
+  try { m = await api("/api/llm/models"); }
+  catch (e) { box.innerHTML = `<p class="warn">${esc(e.message)}</p>`; return; }
+  if (!m.models.length) { box.innerHTML = `<p class="warn">No chat models found. Is Ollama running?</p>`; return; }
+  const k = (n) => n == null ? "?" : n >= 1024 ? `${Math.round(n / 1024)}k` : String(n);
+  const mins = (ctx) => Math.round(ctx / 450);
+  const big = m.models.filter((x) => x.ctx == null || x.ctx >= m.needed_ctx);
+  const small = m.models.filter((x) => x.ctx != null && x.ctx < m.needed_ctx);
+  const use = (x) => x.name === m.current ? '<span class="tag ok">in use</span>' : `<button data-use="${esc(x.name)}">Use</button>`;
+  const bigRows = big.map((x) => `<tr class="${x.name === m.current ? "cur" : ""}"><td>${esc(x.name)}</td>
+      <td>${k(x.ctx)}</td><td>${x.ctx ? `~${mins(x.ctx)} min` : "?"}</td><td>${use(x)}</td></tr>`).join("");
+  const smallRows = small.map((x) => {
+    const copyInUse = x.copy_32k && x.copy_32k === m.current;
+    let act;
+    if (copyInUse) act = `<span class="tag ok">32k version in use</span>`;
+    else if (x.copy_32k) act = `<span class="tag">32k version available: ${esc(x.copy_32k)}</span>`;
+    else if (x.max_ctx == null || x.max_ctx >= m.needed_ctx)
+      act = `<button data-mk="${esc(x.name)}" title="Same model files, nothing to download; context set to 32k">Create 32k version</button>`;
+    else act = `<span class="hint" style="margin:0">model can’t go to 32k (max ${k(x.max_ctx)})</span>`;
+    return `<tr class="${x.name === m.current ? "cur" : ""}"><td>${esc(x.name)}</td>
+      <td class="warn">${k(x.ctx)}</td><td>~${mins(x.ctx)} min</td><td>${act} ${use(x)}</td></tr>`;
+  }).join("");
+  const head = '<tr><th>Model</th><th>Context</th><th>Meeting length</th><th></th></tr>';
+  const cur = m.models.find((x) => x.name === m.current);
+  box.innerHTML = (cur ? "" : `<p class="warn">The model in settings, ${esc(m.current)}, is not on the server. Pick one below.</p>`) +
+    (cur && cur.ctx != null && cur.ctx < m.needed_ctx ? `<p class="warn">The model in use has a ${k(cur.ctx)} context: meetings over ~${mins(cur.ctx)} min will fail. Switch to a 32k model.</p>` : "") +
+    `<h3>32k context <span class="tag ok">recommended</span></h3>
+     <p class="hint">Fits meetings up to ~${mins(m.needed_ctx)} minutes (about 450 tokens per minute of meeting).</p>
+     ${big.length ? `<table class="models">${head}${bigRows}</table>` : `<p class="meta">None yet. Create a 32k version of a model below.</p>`}
+     <h3>Under 32k context</h3>
+     <p class="hint">Ollama’s default context. Too small for most meetings; create a 32k version (same model files, nothing to download).</p>
+     ${small.length ? `<table class="models">${head}${smallRows}</table>` : `<p class="meta">None.</p>`}
+     <p class="hint">To test models against each other, open a recording in Manage → Compare models.</p>`;
+  box.querySelectorAll("[data-use]").forEach((b) => b.onclick = async () => {
+    const x = m.models.find((y) => y.name === b.dataset.use);
+    if (x.ctx != null && x.ctx < m.needed_ctx && !confirm(why32k(x, k, mins(x.ctx)))) return;
+    await saveSetting("llm", "model", x.name); loadSettings();
+  });
+  box.querySelectorAll("[data-mk]").forEach((b) => b.onclick = async () => {
+    b.disabled = true; b.textContent = "Creating…";
+    try {
+      const { model } = await api("/api/llm/create-32k", { model: b.dataset.mk });
+      if (confirm(`Created ${model}. Use it for summaries now?`)) await saveSetting("llm", "model", model);
+    } catch (e) { alert(e.message); }
+    loadSettings();
+  });
+}
+
+initSettings();
 loadList();
 </script>
 </body>

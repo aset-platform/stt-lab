@@ -19,8 +19,9 @@ TRANSCRIPTS = ROOT / "out" / "ui"
 LLM_INBOX = ROOT / "llm" / "inbox"
 LLM_PROCESSED = ROOT / "llm" / "processed"
 LLM_SUMMARIES = ROOT / "llm" / "summaries"
+LLM_COMPARE = ROOT / "llm" / "compare"  # test summaries by other models, see summarise.compare_one
 INDEX = ROOT / "library.json"
-for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES):
+for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES, LLM_COMPARE):
     d.mkdir(parents=True, exist_ok=True)
 
 FOLDERS = {"inbox": "Inbox", "to_summarise": "To summarise", "summarised": "Summarised",
@@ -64,7 +65,8 @@ def glob_escape(s):
 def llm_files(name):
     """Hand-off and summary files belonging to a recording."""
     return [p for p in (LLM_INBOX / f"{name}.md", LLM_PROCESSED / f"{name}.md",
-                        LLM_SUMMARIES / f"{name}.md", LLM_SUMMARIES / f"{name}.json") if p.is_file()]
+                        LLM_SUMMARIES / f"{name}.md", LLM_SUMMARIES / f"{name}.json") if p.is_file()] + \
+        sorted(LLM_COMPARE.glob(f"{glob_escape(name)}.model=*"))
 
 
 def best_transcript(name):
@@ -189,7 +191,7 @@ def rename(old, new_stem):
                 f.rename(dest)
         for f in llm_files(old):
             dest = f.with_name(new + f.name[len(old):])
-            if f.suffix == ".md" and f.parent != LLM_SUMMARIES:
+            if f.suffix == ".md" and f.parent in (LLM_INBOX, LLM_PROCESSED):
                 dest.write_text(f.read_text().replace(f"recording: {old}\n", f"recording: {new}\n", 1))
                 f.unlink()
             else:

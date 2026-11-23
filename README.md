@@ -56,11 +56,14 @@ git config core.hooksPath .githooks
 
 ```bash
 ollama pull gpt-oss:20b                  # ~13 GB, once
-printf 'FROM gpt-oss:20b\nPARAMETER num_ctx 32768\n' > /tmp/Modelfile
-ollama create gpt-oss-20b-32k -f /tmp/Modelfile          # same weights, 32k context (no extra download)
-echo '{"model": "gpt-oss-20b-32k:latest"}' > llm.json
+uv run server.py                         # then Settings tab → Summariser: "Create 32k copy", then "Use"
 uv run summarise.py --check              # should print: ... ready
 ```
+
+Any chat model in Ollama works (e.g. `qwen3.5:9b`). The Settings tab lists them with their context size and
+makes the 32k copy for you (same weights, no extra download). To test models against each other, open a
+recording in Manage → **Compare models**: each runs alone and you see the summaries side by side with time,
+speed and memory.
 
 The 32k-context copy matters: Ollama's default 4096-token context silently cuts any meeting longer than
 ~10 minutes (see [Summaries](#summaries-and-action-items-gpt-oss-20b)). Skip this step if you only need
@@ -141,15 +144,17 @@ llm/processed/   transcripts that have been summarised
 ```
 
 `summarise.py` talks to any OpenAI-compatible server. Default: Ollama on `http://127.0.0.1:11434/v1` with
-model `gpt-oss:20b`. To change it, create `llm.json`, e.g. for LM Studio:
-`{"base_url": "http://127.0.0.1:1234/v1", "model": "openai/gpt-oss-20b"}`.
+model `gpt-oss:20b`. Pick the model in the **Settings** tab; other LLM settings are the `llm` section of
+`settings.json`, e.g. for LM Studio: `{"llm": {"base_url": "http://127.0.0.1:1234/v1", "model": "openai/gpt-oss-20b"}}`.
+By default the model is unloaded as soon as each summary is written (`unload_after_summary`), so its memory
+is free again for recording and transcription.
 
 **Context length (Ollama):** Ollama loads models with a 4096-token context by default and silently cuts longer
-input, which is too small for meetings over ~10 min. Create a 32k-context copy and use it:
+input, which is too small for meetings over ~10 min. Create a 32k-context copy and use it: Settings tab →
+**Create 32k copy**, or by hand:
 
 ```bash
 printf 'FROM gpt-oss:20b\nPARAMETER num_ctx 32768\n' > Modelfile && ollama create gpt-oss-20b-32k -f Modelfile
-echo '{"model": "gpt-oss-20b-32k:latest"}' > llm.json
 ```
 
 If the input or reply is still cut off, the summariser reports it as an error and the transcript stays queued.
@@ -288,7 +293,7 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `recordings/` | Uploaded, fetched and recorded audio (git-ignored, except the `sample-*` files) |
 | `out/ui/` | Saved transcripts, `<recording>.medium.en.json/.txt` (git-ignored, except `sample-*`) |
 | `scripts/repo_guard.py`, `.githooks/pre-commit`, `.github/workflows/repo-guard.yml` | Pre-commit and CI checks: audio only as `recordings/sample-*`, at most 10 minutes |
-| `llm.json` | Local LLM settings, e.g. the 32k-context model name (git-ignored) |
+| `settings.json` | All settings, one section per feature, edited in the Settings tab; defaults in `settings.py` (git-ignored; replaces the older `llm.json`, which is moved in automatically) |
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
 | `summarise.py` | LLM summariser (OpenAI-compatible API) and its CLI |
 | `prompts/meeting_summary.md` | Instructions given to the LLM |

@@ -22,5 +22,6 @@ library.json
 # macOS / local settings
 .DS_Store
 llm.json
+settings.json
 # Local word list for scripts/repo_guard.py
 .guard-terms
