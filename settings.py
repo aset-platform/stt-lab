@@ -25,6 +25,7 @@ DEFAULTS = {
         "language": "",            # "" = detect per chunk, or "en", "hi"
         "task": "translate",       # "translate" = English output, "transcribe" = as spoken
         "speakers": 0,             # 0 = detect automatically
+        "prime_with_names": True,  # give Whisper the workspace's names so it spells them right
     },
     "llm": {
         "base_url": "http://127.0.0.1:11434/v1",  # Ollama's OpenAI-compatible endpoint

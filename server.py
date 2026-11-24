@@ -30,6 +30,7 @@ import labels
 import library
 import settings
 import summarise
+import corrections
 import transcribe
 from library import AUDIO_EXT, RECORDINGS, TRANSCRIPTS, LibraryError
 from transcribe import SR, diarize, fmt, merge
@@ -158,6 +159,26 @@ def variant(model, task):
     return f"{model}.en" if task == "translate" else model
 
 
+_vocab_cache = {}
+
+
+def _vocabulary():
+    """Whisper's initial prompt: the active workspace's people, clients, projects and corrected words.
+    It nudges the decoder toward those spellings; respell (finalize) then fixes what it still mishears.
+    Cached on the registry file's mtime, since live sessions call this for every chunk."""
+    if not settings.get("transcription").get("prime_with_names", True):
+        return None
+    ws = labels.active()
+    try:
+        mtime = (labels.REGISTRY / f"{ws}.json").stat().st_mtime
+    except (OSError, TypeError):
+        return None
+    if _vocab_cache.get("key") != (ws, mtime):
+        names = labels.vocabulary(ws)
+        _vocab_cache.update(key=(ws, mtime), prompt=f"Names: {names}." if names else None)
+    return _vocab_cache["prompt"]
+
+
 def transcribe_chunk(chunk, offset, idx, model, lang, task):
     """Transcribe one pause-delimited chunk. Returns (language, words for merging, segment events)."""
     r = mlx_whisper.transcribe(
@@ -167,6 +188,7 @@ def transcribe_chunk(chunk, offset, idx, model, lang, task):
         task=task,  # "translate" outputs English whatever the spoken language
         word_timestamps=True,
         condition_on_previous_text=False,
+        initial_prompt=_vocabulary(),  # the workspace's names, so Whisper leans toward their spelling
     )
     words, segments = [], []
     for seg in r["segments"]:
@@ -195,6 +217,10 @@ def finalize(path, samples, words, langs, model, lang, task, speakers, timings, 
     duration = len(samples) / SR
     lines = [{"speaker": l["speaker"], "start": l["start"], "end": l["end"], "text": l["text"].strip()}
              for l in merge(words, turns)]
+    try:  # spellings you corrected before ("marlo" -> "Marlow"), in the recording's workspace
+        lines, _ = labels.respell(lines, labels.of(path.name) or labels.active())
+    except Exception:
+        pass
     stats = {"duration": duration, **timings, "diarize_s": time.perf_counter() - t0,
              "speakers": len({t[2] for t in turns}), "languages": sorted(langs), "model": model,
              "task": task, "lang": lang or "auto", "created": datetime.now().isoformat(timespec="seconds")}
@@ -419,6 +445,23 @@ def index_on_start():
     reindex_soon()
 
 
+MCP_AUDIT = ROOT / "logs" / "mcp" / "mcp-audit.jsonl"  # written by the MCP server's container
+
+
+@app.get("/api/mcp/audit")
+def mcp_audit(limit: int = 200):
+    """The MCP server's latest tool calls, newest first: client, tool, arguments, meetings shared."""
+    if not MCP_AUDIT.is_file():
+        return {"calls": [], "total": 0}
+    rows = []
+    for line in MCP_AUDIT.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            pass
+    return {"calls": rows[::-1][:max(1, min(limit, 2000))], "total": len(rows)}
+
+
 @app.get("/api/index/status")
 def index_status():
     return {**index.status(), "last_sync": _sync_state["last"], "syncing": _sync_state["queued"]}
@@ -475,6 +518,26 @@ def library_move(names: list[str] = Body(), folder: str = Body()):
     _not_busy(names)
     library.move(names, folder)
     return {"ok": True}
+
+
+@app.post("/api/library/correct")
+def library_correct(name: str = Body(), wrong: str = Body(), right: str = Body(), kind: str = Body(""),
+                    everywhere: bool = Body(False)):
+    """Fix a misheard word in a meeting (or all of its workspace's) and teach the registry the spelling."""
+    names = [it["name"] for it in library.items(labels.of(name))] if everywhere else [name]
+    _not_busy(names)
+    result = corrections.correct(name, wrong, right, kind, everywhere)
+    if result["changed"] and index.config()["enabled"]:
+        # a changed transcript doesn't alter what the index compares (labels, summary time): re-embed explicitly
+        def refresh(changed=tuple(result["changed"])):
+            for n in changed:
+                try:
+                    index.remove(n)
+                except Exception:
+                    pass
+            _sync()
+        indexer.submit(refresh)
+    return result
 
 
 @app.post("/api/library/workspace")

@@ -5,6 +5,7 @@ stt-lab. Runs in Docker next to the index database (docker-compose.yml) on http:
 
     STT_MCP_DB_URL   read-only database login     STT_EMBED_URL  Ollama, for embedding questions
     STT_TZ           your time zone ("yesterday")  STT_MCP_TOKEN  optional: require "Authorization: Bearer <token>"
+    STT_MCP_AUDIT    audit log file (one JSON line per tool call: client, tool, arguments, meetings shared)
 """
 import os
 import secrets
@@ -15,7 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from . import store
+from . import audit, store
 
 INSTRUCTIONS = """\
 Meeting notes and transcripts recorded with stt-lab: summaries, decisions, action items, open questions,
@@ -52,6 +53,7 @@ def _call(fn, *args, **kw):
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def list_workspaces() -> dict:
     """The workspaces (one per firm) with their number of indexed meetings and date range, which one is
     active, and today's date."""
@@ -59,6 +61,7 @@ def list_workspaces() -> dict:
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def list_meetings(workspace: Workspace = "", when: When = "", since: Day = "", until: Day = "",
                   client: str = "", project: str = "", person: str = "",
                   meeting_type: Annotated[str, Field(description="e.g. client call, 1:1, internal standup")] = "",
@@ -71,6 +74,7 @@ def list_meetings(workspace: Workspace = "", when: When = "", since: Day = "", u
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def get_meeting(meeting: Annotated[str, Field(description="Recording name from list_meetings, or a unique part of the title")],
                 workspace: Workspace = "") -> dict:
     """One meeting's notes: summary points, decisions, action items (owner, due), open questions and
@@ -79,6 +83,7 @@ def get_meeting(meeting: Annotated[str, Field(description="Recording name from l
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def get_transcript(meeting: Annotated[str, Field(description="Recording name from list_meetings, or a unique part of the title")],
                    workspace: Workspace = "",
                    from_minute: Annotated[float | None, Field(description="Start at this minute")] = None,
@@ -90,6 +95,7 @@ def get_transcript(meeting: Annotated[str, Field(description="Recording name fro
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def search(query: Annotated[str, Field(description="What you are looking for, in plain words")],
            workspace: Workspace = "",
            kind: Annotated[Literal["", "summary", "decision", "action", "question", "transcript"],
@@ -104,6 +110,7 @@ def search(query: Annotated[str, Field(description="What you are looking for, in
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def action_items(workspace: Workspace = "", when: When = "", since: Day = "", until: Day = "",
                  owner: Annotated[str, Field(description="Person who took the task on")] = "",
                  client: str = "", project: str = "") -> dict:
@@ -114,6 +121,7 @@ def action_items(workspace: Workspace = "", when: When = "", since: Day = "", un
 
 
 @mcp.tool(annotations=READ)
+@audit.audited
 def registry(workspace: Workspace = "",
              kind: Annotated[Literal["", "client", "project", "person", "topic"], Field(description="Only this kind")] = "") -> dict:
     """The workspace's known clients, projects, people and topics with their correct spelling, the
@@ -222,6 +230,7 @@ def app():
         allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"])
     asgi = mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, transport_security=security,
                                    host="0.0.0.0")
+    asgi = audit.track_client(asgi)  # the audit log names the client that called each tool
     token = os.environ.get("STT_MCP_TOKEN", "").strip()
     return _guard(asgi, token) if token else asgi
 

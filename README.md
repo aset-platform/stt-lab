@@ -212,6 +212,26 @@ call as the summary; **you confirm them** in Manage (a meeting's detail → Labe
 
 Labels are stored in `llm/labels/<recording>.json` and are covered by the Manage search box.
 
+### Fixing misheard words ("Fix a word")
+
+Under a summary, select the misheard word (or type it), give the right spelling and press **Fix**:
+
+- **This meeting is corrected:** summary (JSON and Markdown), saved transcripts, the summariser's
+  copy and the labels, whole words in any case; tick *all meetings in this workspace* to fix them all.
+  The search index re-embeds what changed.
+- **The workspace learns it:** the wrong spelling becomes a "heard as" alias of the person, client,
+  project or topic. If the right spelling is new, pick its type, or *other word / term* for jargon and
+  product names that aren't meeting labels (kept under `words` in the registry).
+- **Next time:**
+  - Whisper is given the workspace's names as its starting prompt, so it leans toward those spellings
+    (Settings → Transcription → *Prime with known names*).
+  - Every new transcript is respelled through the registry.
+  - The summariser's prompt lists every name and word with its "heard as" spellings, and respell runs
+    on its output.
+
+The models themselves aren't retrained: the registry steers them. Speech recognition can still hear a
+new variant ("marlowe"); fix it once and that spelling is covered too.
+
 ## Search index (Postgres + pgvector)
 
 Confirmed meetings are indexed for search by meaning, the base for the MCP server.
@@ -292,6 +312,23 @@ Then ask, for example, "what were the action items from my meetings yesterday?" 
   `127.0.0.1`. That needs a public HTTPS tunnel with authentication, which puts your meeting data on the
   internet; not set up here.
 - **Read-only:** the server's database role can only `SELECT`; it can't change the index or the app.
+- **Audit log:** every tool call is logged in `logs/mcp/mcp-audit.jsonl`, one JSON line each:
+  - time, the calling app (its User-Agent: Codex, Claude Code, ...), tool and arguments
+  - the workspace, and what kind of content went out (list, notes, transcript, registry)
+  - the meetings returned (name, title, date) and the size of the answer
+
+  The meeting text itself isn't logged. It survives container rebuilds, and Settings → **MCP access**
+  shows it. Remember the calling app may send what it receives to its own model provider.
+
+### Codex
+
+Codex runs on the Mac, so it can use the local address. In `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.stt-lab]
+url = "http://127.0.0.1:8765/mcp"
+# bearer_token_env_var = "STT_MCP_TOKEN"   # if you set a token
+```
 
 ## How it works
 
@@ -411,6 +448,8 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `out/ui/` | Saved transcripts, `<recording>.medium.en.json/.txt` (git-ignored, except `sample-*`) |
 | `scripts/repo_guard.py`, `.githooks/pre-commit`, `.github/workflows/repo-guard.yml` | Pre-commit and CI checks: audio only as `recordings/sample-*`, at most 10 minutes |
 | `labels.py`, `prompts/meeting_labels.md` | Meeting labels, workspaces and registries; `registry/` and `llm/labels/` hold the data (git-ignored) |
+| `corrections.py` | "Fix a word": corrects a meeting's summary and transcripts and teaches the registry the spelling |
+| `logs/mcp/mcp-audit.jsonl` | The MCP server's audit log: one line per tool call (git-ignored) |
 | `index.py` | Search index: confirmed meetings as passages with embeddings in Postgres (pgvector) |
 | `docker-compose.yml`, `stt-lab` | The index database and MCP server containers, and the one-command launcher (`./stt-lab up`) |
 | `mcp_server/` | MCP server (tools and prompts over the index), its Dockerfile, and `shared.py` (what the indexer and server agree on) |

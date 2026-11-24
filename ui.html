@@ -108,6 +108,7 @@ table.lib td.dt { white-space: nowrap; }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .tag.ok { color: var(--ok); border-color: var(--ok); }
 .tag.acc { color: var(--accent); border-color: var(--accent); }
+.tag.warn { color: var(--danger); border-color: var(--danger); }
 td.acts { white-space: nowrap; text-align: right; }
 td.acts button { padding: 3px 8px; font-size: 12px; }
 #detail { flex: 1; min-height: 0; overflow-y: auto; font-size: 15px; line-height: 1.55; }
@@ -167,6 +168,9 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .chip-l [data-ed] { cursor: text; }
 .lbl .ltypein, .lnew [data-as] { font-size: 12px; padding: 2px 6px; margin-left: 6px; width: 200px; }
 .lacts { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.fixw { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.fixw .lacts input[type=text] { font-size: 13px; padding: 3px 7px; width: 150px; }
+.fixw select { font-size: 12px; padding: 2px 6px; }
 table.reg { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.reg th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 5px 6px; border-bottom: 1px solid var(--border); }
 table.reg td { padding: 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -276,6 +280,7 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <div class="f" data-pane="cfgSummariser">Summariser</div>
         <div class="f" data-pane="cfgLabels">Labels</div>
         <div class="f" data-pane="cfgIndex">Search index</div>
+        <div class="f" data-pane="cfgMcp">MCP access</div>
       </div>
     </div>
   </aside>
@@ -299,6 +304,10 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <select data-set="transcription.task"><option value="translate">English</option><option value="transcribe">As spoken</option></select></div>
       <div class="setting"><div class="what"><b>Speakers</b><p class="hint">0 = detect automatically</p></div>
         <input type="number" min="0" max="20" style="width:70px" data-set="transcription.speakers"></div>
+      <div class="setting"><div class="what"><b>Prime with known names</b>
+        <p class="hint">Give Whisper the active workspace's people, clients, projects and corrected words, so it spells them
+          that way. Transcripts are also respelled with the corrections you made (“Fix a word” under a summary).</p></div>
+        <input type="checkbox" data-set="transcription.prime_with_names"></div>
     </div>
   </section>
 
@@ -324,6 +333,17 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <button class="primary" id="idxGo">Search</button>
       </div>
       <div id="idxResults" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section class="settings" id="cfgMcp" hidden>
+    <div class="panel">
+      <h2>MCP access <button id="mcpRefresh" style="margin-left:8px">Refresh</button></h2>
+      <p class="hint">Every tool call that Claude, Codex or another app made to the MCP server
+        (<code>http://127.0.0.1:8765/mcp</code>), newest first: which app, which tool, which meetings it was given and how much.
+        The text itself isn't logged. “Notes” means summaries, decisions and action items; “transcript” means transcript text.
+        The app may send what it got to its own model provider. Log file: <code>logs/mcp/mcp-audit.jsonl</code>.</p>
+      <div id="mcpAudit" class="meta">Loading…</div>
     </div>
   </section>
 
@@ -958,10 +978,52 @@ async function renderDetail() {
                <h4>Open questions</h4>${list(data.open_questions)}`
             : `<pre style="white-space:pre-wrap">${esc(markdown)}</pre>`);
     $("copySummary").onclick = (e) => copyText(markdown, e.currentTarget);
+    addFixBox(it);
   } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
   addLabelBox(it);
   renderCompare(it);
 }
+
+// ---- fix a misheard word: corrects this meeting and teaches the workspace registry ----
+function addFixBox(it) {
+  $("detail").insertAdjacentHTML("beforeend", `<div class="fixw" id="fixBox"><b>Fix a word</b>
+    <p class="hint" style="margin:4px 0 0">Select a misheard word in the summary (or type it) and give the right spelling.
+      It is fixed in this meeting's summary and transcript, and remembered for this workspace: future
+      transcripts and summaries write it the right way.</p>
+    <div class="lacts">
+      <input type="text" id="fixWrong" placeholder="wrong, e.g. marlo">→
+      <input type="text" id="fixRight" placeholder="right, e.g. Marlow">
+      <select id="fixKind" title="Needed only when the right spelling is new to the workspace">
+        <option value="">is a… (if new)</option><option value="person">person</option><option value="client">client</option>
+        <option value="project">project</option><option value="topic">topic</option><option value="word">other word / term</option></select>
+      <label class="meta"><input type="checkbox" id="fixAll"> all meetings in this workspace</label>
+      <button class="primary" id="fixGo">Fix</button></div>
+    <div id="fixOut" class="meta" style="margin-top:6px"></div></div>`);
+  const run = async () => {
+    const wrong = $("fixWrong").value.trim(), right = $("fixRight").value.trim();
+    if (!wrong || !right) return;
+    $("fixGo").disabled = true;
+    try {
+      const r = await api("/api/library/correct", { name: it.name, wrong, right, kind: $("fixKind").value, everywhere: $("fixAll").checked });
+      const n = (c) => Object.entries(c).filter(([, v]) => v).map(([k, v]) => `${v} in ${k.replace("_", " ")}`).join(", ") || "no matches";
+      const many = Object.keys(r.meetings).length > 1;
+      $("fixOut").innerHTML = `${esc(r.learned)}.<br>` + (many
+        ? `Fixed in ${r.changed.length} meeting(s): ` + Object.entries(r.meetings).map(([m, c]) => `${esc(m)} (${esc(n(c))})`).join("; ")
+        : `This meeting: ${esc(n(Object.values(r.meetings)[0]))}.`);
+      if (r.changed.includes(it.name)) setTimeout(() => { const keep = $("fixOut").innerHTML; renderDetail().then(() => { if ($("fixOut")) $("fixOut").innerHTML = keep; }); }, 400);
+    } catch (e) { $("fixOut").innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
+    finally { if ($("fixGo")) $("fixGo").disabled = false; }
+  };
+  $("fixGo").onclick = run;
+  $("fixRight").onkeydown = (e) => { if (e.key === "Enter") run(); };
+}
+// Selecting a short bit of the summary fills in the misheard word.
+document.addEventListener("mouseup", () => {
+  const box = $("fixWrong"), sel = window.getSelection();
+  if (!box || !sel || sel.isCollapsed || !$("detail").contains(sel.anchorNode) || $("fixBox").contains(sel.anchorNode)) return;
+  const t = sel.toString().trim();
+  if (t && t.length <= 40 && !t.includes("\n")) { box.value = t; $("fixRight").focus(); }
+});
 
 // ---- compare models: the same transcript through several local models, side by side ----
 let llm = { models: [] }, comparing = null;
@@ -1079,6 +1141,7 @@ async function loadSettings() {
   });
   if (cfgPane === "cfgLabels") return loadLabelSettings();
   if (cfgPane === "cfgIndex") return loadIndexSettings();
+  if (cfgPane === "cfgMcp") return loadMcpAudit();
   if (cfgPane !== "cfgSummariser") return;
   $("llmServer").textContent = `LLM server: ${cfg.llm.base_url}. The model in use writes every summary, manual and auto-summarise.`;
   const box = $("modelTable");
@@ -1356,6 +1419,29 @@ async function loadIndexSettings() {
          unchanged is re-embedded.</p></div><button id="idxSync">Sync now</button></div>`;
   if ($("idxSync")) $("idxSync").onclick = async () => { await api("/api/index/sync", {}); setTimeout(loadIndexSettings, 1500); };
 }
+async function loadMcpAudit() {
+  const box = $("mcpAudit");
+  let a;
+  try { a = await api("/api/mcp/audit?limit=300"); } catch (e) { box.innerHTML = `<p class="warn">${esc(e.message)}</p>`; return; }
+  if (!a.calls.length) { box.innerHTML = '<p class="meta">No tool calls yet.</p>'; return; }
+  // "codex_cli_rs/0.169 (Mac OS ...)" → "codex_cli_rs 0.169"; empty for clients that send no User-Agent
+  const who = (ua) => ua ? esc(ua.split(" ")[0].replace("/", " ")) : '<span class="meta">unknown</span>';
+  const args = (o) => Object.entries(o || {}).map(([k, v]) => `${esc(k)}=${esc(JSON.stringify(v))}`).join(" ");
+  const tag = { transcript: "warn", "transcript+notes": "warn", notes: "acc", registry: "acc", list: "" };
+  const byClient = {};
+  a.calls.forEach((c) => { const k = (c.client || "unknown").split(" ")[0]; byClient[k] = (byClient[k] || 0) + 1; });
+  box.innerHTML = `<p>${a.total} call(s) in all${a.total > a.calls.length ? `, latest ${a.calls.length} shown` : ""} · ` +
+    Object.entries(byClient).map(([k, n]) => `${esc(k)}: ${n}`).join(" · ") + `</p>
+    <table class="reg"><tr><th>When</th><th>App</th><th>Tool</th><th>Arguments</th><th>Shared</th><th>Meetings</th><th>Size</th></tr>` +
+    a.calls.map((c) => `<tr><td style="white-space:nowrap">${esc((c.at || "").slice(0, 19).replace("T", " "))}</td>
+      <td>${who(c.client)}</td><td><code>${esc(c.tool)}</code></td><td style="text-align:left">${args(c.args)}</td>
+      <td>${c.error ? `<span class="tag warn" title="${esc(c.error)}">error</span>` : c.shared ? `<span class="tag ${tag[c.shared] || ""}">${esc(c.shared)}</span>` : ""}
+        ${c.workspace ? `<div class="meta">${esc(c.workspace)}</div>` : ""}</td>
+      <td style="text-align:left">${(c.meetings || []).map((m) => `${esc(m.title || m.meeting)}${m.date ? ` <span class="meta">${esc(m.date)}</span>` : ""}`).join("<br>") || '<span class="meta">—</span>'}</td>
+      <td style="white-space:nowrap">${c.chars >= 1000 ? `${(c.chars / 1000).toFixed(1)} KB` : `${c.chars} B`}</td></tr>`).join("") + "</table>";
+}
+$("mcpRefresh").onclick = loadMcpAudit;
+
 async function runIndexSearch() {
   const q = $("idxQ").value.trim();
   if (!q) return;
