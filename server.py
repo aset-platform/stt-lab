@@ -9,6 +9,7 @@ import os
 import json
 import queue
 import re
+import subprocess
 import threading
 import time
 import wave
@@ -81,6 +82,43 @@ def _sync():
 @app.exception_handler(settings.SettingsError)
 def library_error(_, e):
     return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+class KeepAwake:
+    """Hold off idle sleep while there is work (a live session, a transcription, a summary).
+
+    On battery macOS idle-sleeps a few minutes after the display goes off: a meeting that ended at 09:22
+    froze mid speaker-identification at 09:24 and only finished when the Mac was woken at 09:34.
+    `caffeinate -i` blocks idle sleep only (closing the lid still sleeps) and `-w` ends it with this
+    process. Counted, so overlapping jobs share one caffeinate."""
+
+    def __init__(self):
+        self.n, self.proc, self.lock = 0, None, threading.Lock()
+
+    def __enter__(self):
+        with self.lock:
+            self.n += 1
+            if self.n == 1 and (self.proc is None or self.proc.poll() is not None):
+                try:
+                    self.proc = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())],
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError:  # not macOS
+                    self.proc = None
+        return self
+
+    def run(self, fn, *args):
+        with self:
+            return fn(*args)
+
+    def __exit__(self, *exc):
+        with self.lock:
+            self.n -= 1
+            if self.n == 0 and self.proc is not None:
+                self.proc.terminate()
+                self.proc = None
+
+
+awake = KeepAwake()
 
 
 def release_models():
@@ -186,7 +224,7 @@ def summarise_after(name, emit):
     busy.add(name)
     try:
         release_models()  # make room for the LLM; speech models reload on the next transcription
-        notes = summarise.summarise_one(name)
+        notes = awake.run(summarise.summarise_one, name)
         reindex_soon()
         emit({"type": "summary_done", "name": name, "title": notes.get("title"),
               "action_items": len(notes.get("action_items") or []), "seconds": notes["_meta"]["seconds"]})
@@ -199,7 +237,8 @@ def summarise_after(name, emit):
 def run_job(path, model, lang, speakers, task, emit, extra_stats=None):
     busy.add(path.name)
     try:
-        return _run_job(path, model, lang, speakers, task, emit, extra_stats)
+        with awake:
+            return _run_job(path, model, lang, speakers, task, emit, extra_stats)
     finally:
         busy.discard(path.name)
 
@@ -549,7 +588,7 @@ async def labels_suggest(name: str, workspace: str | None = Body(None, embed=Tru
     await loop.run_in_executor(worker, release_models)
     busy.add(name)
     try:
-        return await loop.run_in_executor(worker, summarise.label_one, name, workspace)
+        return await loop.run_in_executor(worker, awake.run, summarise.label_one, name, workspace)
     finally:
         busy.discard(name)
 
@@ -591,7 +630,7 @@ async def llm_compare(name: str = Body(), models: list[str] = Body()):
     for model in models:
         try:
             await loop.run_in_executor(worker, summarise.unload_all)
-            notes = await loop.run_in_executor(worker, summarise.compare_one, name, model)
+            notes = await loop.run_in_executor(worker, awake.run, summarise.compare_one, name, model)
             results.append({"model": model, "ok": True, "seconds": notes["_meta"]["seconds"]})
         except Exception as e:
             results.append({"model": model, "ok": False, "error": f"{type(e).__name__}: {e}"})
@@ -629,7 +668,7 @@ def summarise_queued(name):
         return None
     busy.add(name)
     try:
-        return summarise.summarise_one(name)
+        return awake.run(summarise.summarise_one, name)
     finally:
         busy.discard(name)
 
