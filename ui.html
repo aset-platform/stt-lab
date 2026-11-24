@@ -707,7 +707,7 @@ async function startLive(fromTab) {
   stream.getAudioTracks()[0].onended = stop;  // Chrome's own "Stop sharing" bar
 
   const box = $("transcript");
-  let finalDuration = 0;
+  let finalDuration = 0, savedAs = "", finished = false;
   ws.onmessage = async (m) => {
     const ev = JSON.parse(m.data);
     // After Stop the server re-transcribes the saved recording at full quality; the live lines stay
@@ -717,7 +717,7 @@ async function startLive(fromTab) {
       setProgress(ev.audio_pos / finalDuration);
       setStatus(`Improving transcript: ${fmt(ev.audio_pos)} of ${fmt(finalDuration)}…`);
     } else if (ev.final && ev.type === "segment") { /* shown all at once when done */ }
-    else if (ev.type === "final_start") setStatus("Recording saved. Improving transcript…");
+    else if (ev.type === "final_start") { savedAs = ev.name; setStatus("Recording saved. Improving transcript…"); }
     else if (ev.type === "ready") setStatus(fromTab ? "Listening to the tab — play the video now." : "Listening…");
     else if (ev.type === "segment") {
       if (!lines.length) { box.innerHTML = ""; $("copyTranscript").disabled = false; }
@@ -733,11 +733,29 @@ async function startLive(fromTab) {
       await selectRecording(ev.recording);
       setStatus(auto ? `Saved as ${ev.recording}. Transcript done. Summarising…`
                      : `Live session saved as ${ev.recording}. Transcript improved and speakers labelled.`);
-    } else if (ev.type === "summary_done") setStatus(summaryMsg(ev));
-    else if (ev.type === "summary_error") setStatus(ev.message, true);
-    else if (ev.type === "error") { setStatus(ev.message, true); stop(); }
+      if (!auto) finished = true;
+    } else if (ev.type === "summary_done") { finished = true; setStatus(summaryMsg(ev)); }
+    else if (ev.type === "summary_error") { finished = true; setStatus(ev.message, true); }
+    else if (ev.type === "error") { finished = true; setStatus(ev.message, true); stop(); }
   };
-  ws.onclose = () => { if (!stopping) { setStatus("Lost connection to the server", true); stop(); } };
+  ws.onclose = () => {
+    if (!stopping) { setStatus("Lost connection to the server", true); stop(); }
+    else if (savedAs && !finished) followUp(savedAs);  // e.g. the Mac slept: the server carries on
+  };
+}
+
+// The live socket dropped after Stop (Mac asleep, tab reloaded, network blip) but the server keeps
+// transcribing and summarising the saved recording: watch its busy list and show the result when done.
+async function followUp(name) {
+  setStatus(`Connection dropped; the server is still working on ${name}. This page will update when it is done…`);
+  let idle = 0;
+  while (idle < 2) {  // two quiet checks in a row: the gap between transcript and summary is brief
+    await new Promise((r) => setTimeout(r, 5000));
+    try { idle = (await api("/api/library")).busy.includes(name) ? 0 : idle + 1; } catch { idle = 0; }
+  }
+  await loadList();
+  await selectRecording(name).catch(() => {});
+  setStatus(`${name} is done. Open Manage to see its summary.`);
 }
 
 $("recBtn").onclick = () => (cfg.recording.live_transcript ? startLive : startRecording)($("recSource").value === "tab");
