@@ -24,7 +24,9 @@ Rules:
   Leave other names as they were said.
 - People: anyone discussed beyond a passing mention goes under "people", with what they own, changes
   to it (moves, new reporting lines, work handed over) and what was said or decided about them, in work
-  terms.
+  terms. Leave out anyone only named in passing, and never list someone because they are in the known
+  names below: only people the transcript talks about. Say each thing about a person once.
+- Say each point once: no summary point, decision or question that repeats another in other words.
 - No guessing about people. Fill "role", "organisation" and "reports_to" only from what the transcript
   says or clearly establishes (e.g. "Tamsin heads new products", "Orrin is Bexley's right hand"). Otherwise
   write "undefined". Never infer someone's role or company from their name, from who speaks most, or

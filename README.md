@@ -118,9 +118,10 @@ no audio is being captured.
 - **Spoken**: `auto`, English or Hindi. Auto detects per chunk; force Hindi if detection flips.
 - **Output**: `English` (Whisper translates as it transcribes) or `As spoken` (Hindi comes out in
   Devanagari).
-- **Speakers**: `2` by default (most calls are two people); enter the count if you know it, it gives exactly
-  that many, or `0` to detect automatically. Detection can merge two people into one speaker, which leaves
-  "you" in the summary without an owner.
+- **Speakers**: the *least* number of people, `2` by default. It is not a cap: voices are grouped by how
+  they sound, and a third or fourth person is still found; only if fewer than this are found is the audio
+  split into this many. `0` = detect only (can merge two similar voices into one speaker, which leaves
+  "you" in the summary without an owner).
 
 **Transcript**: click a line to play from there; the line being played is highlighted.
 Saved recordings and their transcripts reload when you select them in **Recordings**.
@@ -197,10 +198,17 @@ as one call. `llm.keep_alive` ("30m") keeps the model loaded between the parts.
 | One reporting line | "A reports to B" never both ways; loops are cleared (`check_hierarchy`) |
 | Misheard tech terms | "Colibra" → Collibra and similar; names, clients and projects use the registry |
 | Owners | "With Tamsin, you have to…" is the listener's task; an owner named in their own task becomes `unassigned` |
+| Only people who were discussed | a person must be named in the transcript and have something concrete (a stated role, an action item, notes beyond "mentioned"); names the model took from the registry list are dropped (`check_people`) |
+| Each point once | near-repeats in summary, decisions, questions, action items and a person's notes are removed, the more detailed one kept (`dedupe_notes`) |
 | Left out | deal and commercial details, any money amount, remarks about someone's background, swearing and insults, sarcasm, gossip. The guardrail patterns then drop any sentence that still has one ([below](#keeping-sensitive-content-away-from-ai-assistants)) |
 
 `_meta` in each summary's JSON records what the checks cleared (`cleared_without_evidence`,
-`sensitive_sentences_dropped`, `owner_unassigned`). `evaluate.py` scores a summary against its transcript
+`sensitive_sentences_dropped`, `owner_unassigned`, `people_dropped`, `repeats_removed`).
+
+**Whisper's silence filler** is removed before anything reads a transcript (`library.drop_repeats`): a phrase
+looped three or more times in a row ("okay okay okay…") is kept once, and a line that repeats one of
+the four before it word for word is dropped (a short "Okay." only when the same speaker repeats it). New
+transcripts are saved without it; older ones are cleaned when summarised or indexed. `evaluate.py` scores a summary against its transcript
 (names missed, plus an LLM judge).
 
 Once gpt-oss is installed (e.g. `ollama pull gpt-oss:20b`), either click **Summarise queued** in the Manage
@@ -215,7 +223,8 @@ Until then the Manage tab shows *LLM not connected* and queued transcripts simpl
 
 **Memory:** a 9B model needs ~8–9 GB and gpt-oss-20b ~12–13 GB, so neither fits alongside the speech models on
 16 GB. Before summarising, the server unloads Whisper and pyannote (they reload on the next transcription).
-Summaries run on their own thread, one at a time, and wait or pause while anything records or transcribes.
+Summaries run on their own thread, one at a time, and wait or pause while anything records or transcribes;
+index screening (which uses the same model) waits the same way.
 When using `summarise.py` directly, stop the server first.
 
 ## Meeting labels (workspaces and registry)

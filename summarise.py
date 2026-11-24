@@ -535,6 +535,98 @@ def _keep_verified(notes, verified):
             p[f], p[f + "_at"] = (known[f], known.get(f + "_at")) if known else (UNDEFINED, None)
 
 
+_FILLER = re.compile(r"(?i)^(?:(?:he|she|they|was|is|were|only|just|briefly|also)\s+)*(?:mentioned|referred to|named|"
+                     r"brought up|discussed)(?:\s+(?:in|during|by)\s+(?:the\s+)?(?:transcript|meeting|passing|call|"
+                     r"discussion|name))?\s*\.?$")
+
+
+def _similar(a, b):
+    """Two points saying the same: one contains the other (4+ words), 70% of their words are shared, or
+    they are 85% alike as text."""
+    a, b = _norm(a), _norm(b)
+    if not a or not b:
+        return False
+    short, long_ = sorted((a, b), key=len)
+    if len(short.split()) >= 4 and short in long_:
+        return True
+    wa, wb = set(a.split()), set(b.split())
+    if min(len(wa), len(wb)) >= 4 and len(wa & wb) / len(wa | wb) >= 0.7:  # same words, a few added
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= 0.85
+
+
+def _dedupe(items, text=str):
+    """`items` without near-repeats; of two alike, the longer (more detailed) one is kept in place."""
+    out = []
+    for x in items:
+        i = next((j for j, y in enumerate(out) if _similar(text(x), text(y))), None)
+        if i is None:
+            out.append(x)
+        elif len(text(x)) > len(text(out[i])):
+            out[i] = x
+    return out
+
+
+def dedupe_notes(notes):
+    """Remove repeated points: the parts of a long meeting each restate what was said before, and a
+    person's notes are joined from every part. Returns the number of points removed."""
+    n = 0
+    for key in ("summary", "decisions", "open_questions"):
+        items = [x for x in notes.get(key) or [] if str(x).strip()]
+        kept = _dedupe(items)
+        n += len(items) - len(kept)
+        notes[key] = kept
+    acts = [a for a in notes.get("action_items") or [] if isinstance(a, dict)]
+    kept = []
+    for a in acts:  # the same task for the same owner (or one side unassigned)
+        o = _norm(a.get("owner"))
+        i = next((j for j, b in enumerate(kept) if _similar(a.get("task"), b.get("task"))
+                  and (o == _norm(b.get("owner")) or "unassigned" in (o, _norm(b.get("owner"))))), None)
+        if i is None:
+            kept.append(a)
+        elif _norm(kept[i].get("owner")) == "unassigned" or len(str(a.get("task"))) > len(str(kept[i].get("task"))):
+            kept[i] = {**kept[i], **{k: v for k, v in a.items() if v and _norm(v) != "unassigned"}}
+    n += len(acts) - len(kept)
+    notes["action_items"] = kept
+    for p in notes.get("people") or []:
+        if isinstance(p, dict) and p.get("notes"):
+            parts = [x.strip() for x in re.split(r";\s+|(?<=[.!?])\s+", str(p["notes"])) if x.strip(" .;")]
+            kept = _dedupe(parts)
+            n += len(parts) - len(kept)
+            p["notes"] = " ".join(x if x.endswith((".", "!", "?")) else x + "." for x in kept)
+    return n
+
+
+def check_people(notes, transcript):
+    """Keep only people the meeting actually talked about: their name (or a close spelling) is in the
+    transcript, and something concrete is known about them (a stated role, organisation or manager, an
+    action item, or notes beyond "mentioned"). Names the model took from the known-names list, or that
+    only came up in passing, are dropped. Returns the dropped names."""
+    words = set(_norm(transcript).split())
+    owners = {_norm(a.get("owner")) for a in notes.get("action_items") or [] if isinstance(a, dict)}
+
+    def heard(name):
+        toks = [t for t in _norm(name).split() if len(t) >= 3]
+        return any(t in words or any(_close(t, w) for w in words if w[:1] == t[:1]) for t in toks)
+
+    def concrete(p):
+        if any(_known(p.get(f)) for f in ("role", "organisation", "reports_to")):
+            return True
+        if _norm(p.get("name")) in owners or any(o and o in _norm(p.get("name")).split() for o in owners):
+            return True
+        sents = [x for x in re.split(r";\s+|(?<=[.!?])\s+", str(p.get("notes") or "")) if x.strip(" .;")]
+        return any(not _FILLER.match(x.strip()) for x in sents)
+
+    kept, dropped = [], []
+    for p in notes.get("people") or []:
+        if isinstance(p, dict) and p.get("name") and heard(p["name"]) and concrete(p):
+            kept.append(p)
+        elif isinstance(p, dict):
+            dropped.append(str(p.get("name") or ""))
+    notes["people"] = kept
+    return dropped
+
+
 def check_owners(notes):
     """An action item whose owner is named in the task itself ("Marlow: understand the current state with
     Marlow") is about that person, not done by them: the owner becomes "unassigned". Returns the tasks changed."""
@@ -596,6 +688,8 @@ def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
     notes["people"] = [p for p in notes.get("people") or []
                        if not (isinstance(p, dict) and re.fullmatch(r"(?i)speaker[ _]?\d+", str(p.get("name") or "").strip()))]
     cleared = check_evidence(notes, transcript, ws)
+    people_dropped = check_people(notes, transcript)
+    repeats = dedupe_notes(notes)
     check_hierarchy(notes)
     owners = check_owners(notes)
     dropped = drop_sensitive(notes)
@@ -606,6 +700,10 @@ def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
         notes["_meta"]["sensitive_sentences_dropped"] = dropped
     if owners:
         notes["_meta"]["owner_unassigned"] = owners
+    if people_dropped:
+        notes["_meta"]["people_dropped"] = people_dropped
+    if repeats:
+        notes["_meta"]["repeats_removed"] = repeats
     if raw is not None:
         notes["labels"] = raw
     return notes

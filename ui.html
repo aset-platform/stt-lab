@@ -225,7 +225,7 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
           <option selected>medium</option></select></label>
         <label title="Language being spoken; auto detects it per chunk">Spoken <select id="lang"><option value="">auto</option><option value="en">English</option><option value="hi">Hindi</option></select></label>
         <label>Output <select id="task"><option value="translate" selected>English</option><option value="transcribe">As spoken</option></select></label>
-        <label>Speakers <input id="speakers" type="number" min="0" max="20" value="2" style="width:60px" title="Number of people speaking; 0 = detect automatically"></label>
+        <label>Speakers <input id="speakers" type="number" min="0" max="20" value="2" style="width:60px" title="At least this many people; more voices are still detected. 0 = detect only"></label>
         <button class="primary" id="go" disabled>Transcribe</button>
         <label style="margin-left:auto"><input type="checkbox" id="follow" checked> Follow playback</label>
         <button id="copyTranscript" disabled title="Copy the transcript with times and speakers">Copy transcript</button>
@@ -302,7 +302,8 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
         <select data-set="transcription.language"><option value="">auto (per chunk)</option><option value="en">English</option><option value="hi">Hindi</option></select></div>
       <div class="setting"><div class="what"><b>Output</b></div>
         <select data-set="transcription.task"><option value="translate">English</option><option value="transcribe">As spoken</option></select></div>
-      <div class="setting"><div class="what"><b>Speakers</b><p class="hint">0 = detect automatically</p></div>
+      <div class="setting"><div class="what"><b>Speakers</b><p class="hint">At least this many; more voices are still
+          detected. 0 = detect only</p></div>
         <input type="number" min="0" max="20" style="width:70px" data-set="transcription.speakers"></div>
       <div class="setting"><div class="what"><b>Prime with known names</b>
         <p class="hint">Give Whisper the active workspace's people, clients, projects and corrected words, so it spells them

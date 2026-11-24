@@ -6,6 +6,7 @@ The token is only needed for the first run (model download); after that it runs 
 import argparse
 import functools
 import os
+import re
 import time
 from pathlib import Path
 
@@ -58,6 +59,10 @@ def _pipeline():
 def diarize(samples, num_speakers):
     """Speaker turns: pyannote finds when someone is speaking, then we regroup the turns by voice.
 
+    num_speakers is a minimum, not a cap: voices are grouped by distance as when it is 0, and only if that
+    finds fewer than num_speakers are the turns split into exactly that many. A third or fourth person
+    in a call with the default of 2 is still found.
+
     pyannote's own clustering merged distinct speakers on every test clip (e.g. a moderator into a
     participant, two men into one), while its per-turn voice embeddings told them apart clearly.
     So we keep its turns and redo only the grouping: agglomerative clustering on per-turn embeddings.
@@ -92,7 +97,9 @@ def diarize(samples, num_speakers):
         return turns  # too little speech to regroup; keep pyannote's labels
     E = np.array([embed(s, e) for s, e, _ in turns])
     Z = linkage(E[long_idx], "average", metric="cosine")
-    labels = fcluster(Z, num_speakers, "maxclust") if num_speakers else fcluster(Z, SAME_SPEAKER_DIST, "distance")
+    labels = fcluster(Z, SAME_SPEAKER_DIST, "distance")
+    if num_speakers and len(set(labels)) < num_speakers:
+        labels = fcluster(Z, num_speakers, "maxclust")
     centroids = {c: E[long_idx][labels == c].mean(0) for c in set(labels)}
     durations = np.array([e - s for s, e, _ in turns])
 
@@ -101,8 +108,8 @@ def diarize(samples, num_speakers):
 
     speaker = assign()
     # Fold away speakers with too little speech: over a long recording a few odd-sounding
-    # one-word turns otherwise each become a "speaker". Skipped when the count was given.
-    while not num_speakers and len(centroids) > 1:
+    # one-word turns otherwise each become a "speaker". Never below the minimum that was given.
+    while len(centroids) > max(1, num_speakers or 1):
         totals = {c: durations[speaker == c].sum() for c in centroids}
         smallest = min(totals, key=totals.get)
         if totals[smallest] >= MIN_SPEAKER_SHARE * durations.sum():
@@ -150,7 +157,7 @@ def main():
     p.add_argument("audio")
     p.add_argument("--model", default="medium")
     p.add_argument("--lang", default=None, help="force language, e.g. hi or en")
-    p.add_argument("--speakers", type=int, default=None, help="exact speaker count, if known")
+    p.add_argument("--speakers", type=int, default=None, help="at least this many speakers (more are still detected)")
     a = p.parse_args()
 
     samples = decode_audio(a.audio, sampling_rate=SR)

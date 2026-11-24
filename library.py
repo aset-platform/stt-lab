@@ -71,11 +71,63 @@ def llm_files(name):
         sorted(LLM_COMPARE.glob(f"{glob_escape(name)}.model=*"))
 
 
+_WORDS = re.compile(r"\S+")
+
+
+def _collapse_loops(text, times=3):
+    """A phrase of 1-8 words said `times` or more times in a row is kept once: Whisper fills silence and
+    noise by looping ("okay okay okay ...", "thank you. thank you. thank you."). Real speech
+    repeating a phrase twice is left alone."""
+    words = _WORDS.findall(text)
+    key = [re.sub(r"[^\w]", "", w.lower()) for w in words]
+    out, i = [], 0
+    while i < len(words):
+        for n in range(1, 9):
+            reps = 1
+            while i + (reps + 1) * n <= len(words) and key[i + reps * n:i + (reps + 1) * n] == key[i:i + n] \
+                    and any(key[i:i + n]):
+                reps += 1
+            if reps >= times:
+                out += words[i:i + n]
+                i += reps * n
+                break
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
+def drop_repeats(lines, window=4):
+    """Lines without Whisper's silence filler: loops inside a line are collapsed, and a line that repeats
+    one of the `window` lines before it word for word is dropped ("Thanks for watching." over and over).
+    A short reply ("Okay.", "Yes.") is only dropped when the same speaker repeats it. Returns (lines, n)."""
+    out, recent, n = [], [], 0
+    for l in lines:
+        text = _collapse_loops(l.get("text") or "")
+        key = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+        if not key:
+            n += 1
+            continue
+        same = [r for r in recent if r[0] == key]
+        if same and (len(key.split()) >= 3 or any(r[1] == l.get("speaker") for r in same)):
+            n += 1
+            continue
+        if text != (l.get("text") or ""):
+            n += 1
+        out.append({**l, "text": text})
+        recent = (recent + [(key, l.get("speaker"))])[-window:]
+    return out, n
+
+
 def best_transcript(name):
+    """The transcript used for summaries, the index and evaluation, without Whisper's silence filler
+    (drop_repeats; transcripts saved before the filter existed are cleaned here too)."""
     for v in HANDOFF_VARIANTS:
         p = TRANSCRIPTS / f"{name}.{v}.json"
         if p.is_file():
-            return json.loads(p.read_text())
+            t = json.loads(p.read_text())
+            t["lines"], _ = drop_repeats(t.get("lines") or [])
+            return t
     return None
 
 

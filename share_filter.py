@@ -27,6 +27,7 @@ CACHE = library.ROOT / "llm" / "guard"
 BATCH = 40
 REASONS = {"deal", "personal", "abuse", "sarcasm", "gossip", "compliance"}
 VERSION = "s1"  # part of the index fingerprint: a new version re-screens every meeting
+wait = None  # set by the server: called before each batch, it holds screening while a recording runs
 
 
 def enabled():
@@ -66,6 +67,8 @@ def screen(name, texts, log=print):
         batch = texts[a:a + BATCH]
         if all(_key(t) in cache for t in batch):
             continue
+        if wait:
+            wait()
         log(f"{name}: screening items {a + 1}-{a + len(batch)} of {len(texts)}")
         flagged = _ask(cfg, model, name, batch)
         for i, t in enumerate(batch):
