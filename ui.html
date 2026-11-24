@@ -178,12 +178,46 @@ table.reg tr.arch td { color: var(--muted); }
 table.reg td:last-child { text-align: right; white-space: nowrap; }
 table.reg button { padding: 2px 8px; font-size: 12px; }
 table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
+#viewObserve { display: block; overflow-y: auto; }
+#viewObserve[hidden] { display: none; }
+.obs { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; padding-bottom: 30px; }
+#obsBody { display: flex; flex-direction: column; gap: 14px; }
+.obs .panel { overflow-x: auto; }
+.obs .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.obs .head h2 { margin: 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); }
+.obs .head .meta { margin-left: auto; }
+.verdict { border-radius: 10px; padding: 12px 14px; border: 1px solid; font-size: 14px; }
+.verdict.ok { border-color: var(--ok); color: var(--ok); }
+.verdict.bad { border-color: var(--danger); color: var(--danger); }
+.verdict.mid { border-color: var(--s4); color: var(--s4); }
+.verdict p { margin: 4px 0 0; color: var(--text); font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile .n { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.tile .n.bad { color: var(--danger); }
+.tile .n.good { color: var(--ok); }
+.tile .l { font-size: 12px; color: var(--muted); }
+.tile .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.obs table.reg td, .obs table.reg th { text-align: left; }
+.obs table.reg td:last-child { text-align: left; white-space: normal; }
+.obs details { margin-top: 4px; }
+.obs details summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.obs .itm { font-size: 12px; padding: 4px 0; border-top: 1px dashed var(--border); }
+.obs .itm:first-of-type { border-top: none; }
+.obs .itm q { quotes: none; }
+.check { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); align-items: baseline; }
+.check:first-of-type { border-top: none; }
+.check .mark { width: 18px; font-weight: 700; }
+.check .mark.ok { color: var(--ok); }
+.check .mark.bad { color: var(--danger); }
+.reasons { display: flex; flex-wrap: wrap; gap: 4px; }
+@media (max-width: 800px) { #viewObserve { padding: 12px 16px; } }
 
 </style>
 </head>
 <body>
 <header><h1>Meeting Transcribe Lab</h1><span>mlx-whisper + pyannote · runs locally</span>
-  <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button><button data-view="viewSettings">Settings</button></nav>
+  <nav class="tabs"><button class="on" data-view="viewTranscribe">Transcribe</button><button data-view="viewManage">Manage</button><button data-view="viewObserve">Observability</button><button data-view="viewSettings">Settings</button></nav>
   <label class="wstop" title="Every page shows this workspace's recordings; new recordings join it">Workspace <select id="wsTop"></select></label>
 </header>
 <main id="viewTranscribe">
@@ -269,6 +303,14 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
     </div>
     <div class="panel" id="detail"><div class="empty">Select a recording to see its details and summary.</div></div>
   </section>
+</main>
+
+<main id="viewObserve" hidden>
+  <div class="obs">
+    <div class="head"><h2>Observability: has anything left this Mac that shouldn't have?</h2>
+      <span class="meta" id="obsAt"></span><button id="obsRefresh">Refresh</button></div>
+    <div id="obsBody"><p class="meta">Loading…</p></div>
+  </div>
 </main>
 
 <main id="viewSettings" hidden>
@@ -797,7 +839,8 @@ document.querySelectorAll("nav.tabs button").forEach((b) => b.onclick = () => sh
 function showView(id) {
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("on", b.dataset.view === id));
   document.querySelectorAll("main").forEach((m) => (m.hidden = m.id !== id));
-  if (id === "viewManage") { loadLibrary(); loadLlm(); } else if (id === "viewSettings") loadSettings(); else loadList();
+  if (id === "viewManage") { loadLibrary(); loadLlm(); } else if (id === "viewSettings") loadSettings();
+  else if (id === "viewObserve") loadObserve(); else loadList();
 }
 
 // ---------- manage ----------
@@ -1470,6 +1513,114 @@ async function loadMcpAudit() {
       <td style="white-space:nowrap">${c.chars >= 1000 ? `${(c.chars / 1000).toFixed(1)} KB` : `${c.chars} B`}</td></tr>`).join("") + "</table>";
 }
 $("mcpRefresh").onclick = loadMcpAudit;
+
+// ---------- observability ----------
+const REASON = { deal: "deal", money: "money", personal: "personal", sensitive: "background", abuse: "abuse",
+                 sarcasm: "sarcasm", gossip: "gossip", compliance: "compliance", flagged: "flagged" };
+const oesc = (x) => esc(String(x ?? ""));
+const when = (x) => oesc((x || "").slice(0, 16).replace("T", " "));
+const mmss = (t) => t == null ? "" : `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const app = (ua) => ua ? oesc(ua.split(" ")[0].split("/")[0]) : '<span class="meta">unknown app</span>';
+const reasonTag = (r, n) => `<span class="tag warn">${oesc(REASON[r] || r)}${n != null ? ` ${n}` : ""}</span>`;
+const itemLine = (i) => `<div class="itm">${reasonTag(i.reason)} <span class="meta">${oesc(i.kind)}${i.at != null ? ` @ ${mmss(i.at)}` : ""}
+  ${i.speaker ? ` · ${oesc(i.speaker)}` : ""}${i.title && i.showTitle ? ` · ${oesc(i.title)}` : ""}</span><br><q>${oesc(i.text)}</q></div>`;
+const LEVEL = { leak: ["warn", "shared, now restricted"], unprotected: ["warn", "before guardrails"],
+                unverified: ["", "not verifiable"] };
+
+async function loadObserve() {
+  const box = $("obsBody");
+  let r;
+  try { r = await api("/api/observe"); } catch (e) { box.innerHTML = `<p class="warn">${oesc(e.message)}</p>`; return; }
+  $("obsAt").textContent = "Checked " + new Date().toLocaleTimeString();
+  const s = r.summary, scan = r.scan;
+  const problems = s.leaks + s.unprotected + s.checks_failed + s.scan_hits;
+  const verdict = problems
+    ? `<div class="verdict bad"><b>${problems} finding(s) need a look</b><p>${[
+        s.leaks && `${s.leaks} MCP call(s) shared items that are restricted now`,
+        s.unprotected && `${s.unprotected} call(s) ran before the guardrails`,
+        s.checks_failed && `${s.checks_failed} safety check(s) failed`,
+        s.scan_hits && `restricted text found in ${s.scan_hits} place(s) in AI client logs`].filter(Boolean).join(" · ")}.
+        Details below.</p></div>`
+    : s.unverified
+    ? `<div class="verdict mid"><b>No leak found</b><p>The protections pass their checks and no fingerprinted call shared a
+        restricted item. ${s.unverified} older call(s), logged before fingerprints, can't be verified item by item.</p></div>`
+    : `<div class="verdict ok"><b>No leak found</b><p>The protections pass their checks, and no MCP call shared anything that
+        is restricted.</p></div>`;
+  const reasons = Object.entries(s.reasons).sort((a, b) => b[1] - a[1]);
+  const tiles = `<div class="tiles">
+    <div class="tile"><div class="n">${s.calls}</div><div class="l">MCP calls in all</div>
+      <div class="sub">${s.calls_24h} in the last 24 h · ${Object.entries(s.clients).map(([k, n]) => `${oesc(k)} ${n}`).join(", ") || "none"}</div></div>
+    <div class="tile"><div class="n">${s.restricted}</div><div class="l">items held back from MCP</div>
+      <div class="sub">${reasons.map(([k, n]) => `${oesc(REASON[k] || k)} ${n}`).join(" · ") || "nothing restricted"}</div></div>
+    <div class="tile"><div class="n">${s.removed}</div><div class="l">sentences removed by guardrails</div>
+      <div class="sub">in answers already sent${s.guarded_since ? ` · since ${when(s.guarded_since)}` : ""}</div></div>
+    <div class="tile"><div class="n ${s.leaks || s.unprotected ? "bad" : "good"}">${s.leaks + s.unprotected}</div><div class="l">leak alerts</div>
+      <div class="sub">${s.unverified} unverifiable older call(s)</div></div>
+    <div class="tile"><div class="n ${s.checks_failed ? "bad" : "good"}">${r.checks.length - s.checks_failed}/${r.checks.length}</div>
+      <div class="l">safety checks passing</div><div class="sub">database rights and screened views</div></div>
+    <div class="tile"><div class="n ${s.scan_hits ? "bad" : scan ? "good" : ""}">${scan ? s.scan_hits : "–"}</div>
+      <div class="l">hits in AI client logs</div><div class="sub">${scan ? `scanned ${when(scan.at)}` : "not scanned yet"}</div></div>
+  </div>`;
+
+  const alertsHtml = r.alerts.length ? `<table class="reg"><tr><th>When</th><th>App</th><th>Tool</th><th>Finding</th></tr>` +
+    r.alerts.map((a) => `<tr><td style="white-space:nowrap">${when(a.at)}</td><td>${app(a.client)}</td>
+      <td><code>${oesc(a.tool)}</code><div class="meta">${oesc(Object.entries(a.args || {}).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" "))}</div></td>
+      <td><span class="tag ${LEVEL[a.level][0]}">${LEVEL[a.level][1]}</span> ${oesc(a.why)}
+        ${(a.meetings || []).map((m) => `<div class="meta">${oesc(m.title)}: ${m.restricted} restricted item(s)</div>`).join("")}
+        ${a.items ? `<details><summary>${a.items.length} item(s)</summary>${a.items.map((i) => itemLine({ ...i, showTitle: true })).join("")}</details>` : ""}</td></tr>`).join("") + "</table>"
+    : '<p class="meta">None. No MCP call has shared anything that is restricted.</p>';
+
+  const checksHtml = r.checks.map((c) => `<div class="check"><span class="mark ${c.ok ? "ok" : "bad"}">${c.ok ? "✓" : "✗"}</span>
+    <div><b>${oesc(c.check)}</b><div class="meta">${oesc(c.detail)}</div></div></div>`).join("");
+
+  const outside = (scan?.hits || []).filter((h) => !h.dev), dev = (scan?.hits || []).filter((h) => h.dev);
+  const hitRows = (hs) => `<table class="reg"><tr><th>App</th><th>Session log</th><th>Meeting</th><th>Text</th></tr>` +
+    hs.map((h) => `<tr><td>${oesc(h.client)}</td><td><code style="word-break:break-all">${oesc(h.file)}</code><div class="meta">${when(h.modified)}</div></td>
+      <td>${oesc(h.title)}<div class="meta">${oesc(h.held)}</div></td><td>${reasonTag(h.reason)} <q>${oesc(h.text)}</q></td></tr>`).join("") + "</table>";
+  const scanHtml = `<p class="hint" style="margin-top:0">Looks for every restricted text (${scan ? scan.texts : "…"} of at least 30 characters)
+    in the session logs Codex and Claude Code keep on this Mac (${oesc((scan?.roots || ["~/.codex/sessions", "~/.claude/projects"]).join(", "))}).
+    A hit means the text was in a conversation with that app, so its model provider has seen it too.</p>
+    <div class="row"><button id="obsScan">Scan now</button><span class="meta">${scan ? `Last scan ${when(scan.at)}: ${scan.files} file(s),
+      ${(scan.bytes / 1e6).toFixed(1)} MB in ${scan.seconds} s` : "Not scanned yet."}</span></div>
+    ${scan ? (outside.length ? `<p class="warn"><b>${outside.length} hit(s)</b> outside development sessions:</p>${hitRows(outside)}`
+      : '<p style="color:var(--ok)">No restricted text in Codex or other Claude Code sessions.</p>') : ""}
+    ${dev.length ? `<details><summary>${dev.length} hit(s) in Claude Code sessions of this repo (building and testing stt-lab)</summary>
+      <p class="hint">These are development conversations about stt-lab itself, where screening results were looked at while testing.
+      They are not MCP calls, but the text did go to the model provider of that session.</p>${hitRows(dev)}</details>` : ""}`;
+
+  const heldHtml = r.index_error ? `<p class="warn">${oesc(r.index_error)}</p>` : r.restricted.length
+    ? `<table class="reg"><tr><th>Meeting</th><th>Held back</th><th></th></tr>` + r.restricted.map((m) => `<tr>
+      <td>${oesc(m.title)}<div class="meta">${oesc(m.held)} · ${oesc(m.workspace)}</div></td>
+      <td><div class="reasons">${Object.entries(m.reasons).sort((a, b) => b[1] - a[1]).map(([k, n]) => reasonTag(k, n)).join("")}</div></td>
+      <td><details><summary>${m.items.length} item(s)</summary>${m.items.map(itemLine).join("")}</details></td></tr>`).join("") + "</table>"
+    : '<p class="meta">Nothing is restricted.</p>';
+
+  const callsHtml = r.calls.length ? `<table class="reg"><tr><th>When</th><th>App</th><th>Tool</th><th>Shared</th><th>Items</th><th>Removed</th><th></th></tr>` +
+    r.calls.slice(0, 60).map((c) => `<tr><td style="white-space:nowrap">${when(c.at)}</td><td>${app(c.client)}</td>
+      <td><code>${oesc(c.tool)}</code><div class="meta">${oesc(Object.entries(c.args || {}).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" "))}</div></td>
+      <td>${c.error ? '<span class="tag warn">error</span>' : oesc(c.shared || "")}<div class="meta">${(c.meetings || []).map((m) => oesc(m.title || m.meeting)).join("<br>")}</div></td>
+      <td>${c.items == null ? '<span class="meta">not logged</span>' : c.items}</td><td>${c.removed || 0}</td>
+      <td>${c.flag ? `<span class="tag ${LEVEL[c.flag][0]}">${LEVEL[c.flag][1]}</span>` : '<span class="tag ok">ok</span>'}</td></tr>`).join("") + "</table>"
+    : '<p class="meta">No MCP calls yet.</p>';
+
+  box.innerHTML = `${verdict}${tiles}
+    <div class="panel"><h2>Alerts</h2><p class="hint" style="margin-top:0">Every MCP call is checked against what is restricted
+      now, so an item restricted later (new screening, a fixed rule) still shows which calls had already shared it.
+      Calls logged before ${s.fingerprinted_since ? when(s.fingerprinted_since) : "fingerprints were added"} can only be checked by meeting.</p>${alertsHtml}</div>
+    <div class="panel"><h2>Safety checks</h2>${checksHtml}</div>
+    <div class="panel"><h2>AI client logs</h2>${scanHtml}</div>
+    <div class="panel"><h2>Held back from MCP</h2><p class="hint" style="margin-top:0">Restricted by the guardrail patterns or
+      the screening when the meeting was indexed. Still searchable on this Mac; MCP clients get nothing of them
+      (a transcript line reads “[removed]”).</p>${heldHtml}</div>
+    <div class="panel"><h2>Recent MCP calls</h2><p class="hint" style="margin-top:0">Items = points and transcript lines sent
+      (fingerprinted, never the text). The full log is in Settings › MCP access.</p>${callsHtml}</div>`;
+  $("obsScan").onclick = async () => {
+    $("obsScan").disabled = true; $("obsScan").textContent = "Scanning…";
+    try { await api("/api/observe/scan", {}); } catch (e) { alert(e.message); }
+    loadObserve();
+  };
+}
+$("obsRefresh").onclick = loadObserve;
 
 async function runIndexSearch() {
   const q = $("idxQ").value.trim();
