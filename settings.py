@@ -20,6 +20,7 @@ DEFAULTS = {
     "recording": {
         "live_transcript": True,   # transcribe while recording; speakers are labelled when you stop
         "auto_summarise": True,    # after transcript + speakers: summarise and file under Summarised
+        "your_name": "",           # who records on this Mac: tells the summariser you are one of the voices
     },
     "transcription": {             # starting values of the Transcribe tab's controls
         "language": "",            # "" = detect per chunk, or "en", "hi"

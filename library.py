@@ -13,6 +13,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import settings
+
 ROOT = Path(__file__).parent
 RECORDINGS = ROOT / "recordings"
 TRANSCRIPTS = ROOT / "out" / "ui"
@@ -21,8 +23,9 @@ LLM_PROCESSED = ROOT / "llm" / "processed"
 LLM_SUMMARIES = ROOT / "llm" / "summaries"
 LLM_COMPARE = ROOT / "llm" / "compare"  # test summaries by other models, see summarise.compare_one
 LLM_LABELS = ROOT / "llm" / "labels"  # meeting labels (suggested / confirmed), see labels.py
+LLM_SPEAKERS = ROOT / "llm" / "speakers"  # who each SPEAKER_nn of a meeting is, see speaker_names
 INDEX = ROOT / "library.json"
-for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES, LLM_COMPARE, LLM_LABELS):
+for d in (RECORDINGS, TRANSCRIPTS, LLM_INBOX, LLM_PROCESSED, LLM_SUMMARIES, LLM_COMPARE, LLM_LABELS, LLM_SPEAKERS):
     d.mkdir(parents=True, exist_ok=True)
 
 FOLDERS = {"inbox": "Inbox", "to_summarise": "To summarise", "summarised": "Summarised",
@@ -67,7 +70,7 @@ def llm_files(name):
     """Hand-off and summary files belonging to a recording."""
     return [p for p in (LLM_INBOX / f"{name}.md", LLM_PROCESSED / f"{name}.md",
                         LLM_SUMMARIES / f"{name}.md", LLM_SUMMARIES / f"{name}.json",
-                        LLM_LABELS / f"{name}.json") if p.is_file()] + \
+                        LLM_LABELS / f"{name}.json", LLM_SPEAKERS / f"{name}.json") if p.is_file()] + \
         sorted(LLM_COMPARE.glob(f"{glob_escape(name)}.model=*"))
 
 
@@ -119,16 +122,77 @@ def drop_repeats(lines, window=4):
     return out, n
 
 
-def best_transcript(name):
+_LABEL = re.compile(r"SPEAKER_\d+")
+
+
+def speaker_names(name):
+    """{"SPEAKER_01": "Marlow", ...}: the names you gave this meeting's voices (empty if none)."""
+    p = LLM_SPEAKERS / f"{name}.json"
+    return json.loads(p.read_text()) if p.is_file() else {}
+
+
+def set_speaker_names(name, names):
+    """Save who each voice is. Blank names are dropped; one name for two labels is allowed (diarisation
+    sometimes splits a voice). Returns the saved mapping."""
+    audio_path(name)
+    clean = {}
+    for label, who in (names or {}).items():
+        who = re.sub(r"\s+", " ", str(who or "")).strip()[:60]
+        if not _LABEL.fullmatch(str(label)):
+            raise LibraryError(f"not a speaker label: {label!r}")
+        if who:
+            if _LABEL.fullmatch(who.upper().replace(" ", "_")):
+                raise LibraryError(f"give {label} a person's name, not a label")
+            clean[label] = who
+    p = LLM_SPEAKERS / f"{name}.json"
+    if clean:
+        p.write_text(json.dumps(clean, ensure_ascii=False, indent=1))
+    else:
+        p.unlink(missing_ok=True)
+    with _lock:
+        if folder_of(name) == "to_summarise":
+            export_handoff(name)  # already queued: the summariser reads the names from the hand-off
+    return clean
+
+
+def name_speakers(lines, names):
+    """The lines with each named SPEAKER_nn replaced by the person's name (new dicts; others unchanged)."""
+    if not names:
+        return lines
+    return [{**l, "speaker": names.get(l.get("speaker"), l.get("speaker"))} for l in lines]
+
+
+def best_transcript(name, named=True):
     """The transcript used for summaries, the index and evaluation, without Whisper's silence filler
-    (drop_repeats; transcripts saved before the filter existed are cleaned here too)."""
+    (drop_repeats; transcripts saved before the filter existed are cleaned here too). With `named`, the
+    voices you named (speaker_names) carry the person's name instead of SPEAKER_nn."""
     for v in HANDOFF_VARIANTS:
         p = TRANSCRIPTS / f"{name}.{v}.json"
         if p.is_file():
             t = json.loads(p.read_text())
             t["lines"], _ = drop_repeats(t.get("lines") or [])
+            if named:
+                t["lines"] = name_speakers(t["lines"], speaker_names(name))
             return t
     return None
+
+
+def speaker_overview(name):
+    """Each voice of the meeting with its talk time and a few of its longer lines, to tell who is who."""
+    t = best_transcript(name, named=False)
+    if not t:
+        raise LibraryError(f"{name} has no transcript yet")
+    out = {}
+    for l in t["lines"]:
+        sp = out.setdefault(l["speaker"], {"label": l["speaker"], "seconds": 0.0, "lines": 0, "samples": []})
+        sp["seconds"] += max(0.0, float(l.get("end", 0)) - float(l.get("start", 0)))
+        sp["lines"] += 1
+        sp["samples"].append((len(l["text"]), l["start"], l["text"]))
+    for sp in out.values():
+        best = sorted(sp["samples"], reverse=True)[:3]
+        sp["samples"] = [{"at": _fmt(a), "text": t} for _, a, t in sorted(best, key=lambda x: x[1])]
+        sp["seconds"] = round(sp["seconds"])
+    return sorted(out.values(), key=lambda s: s["label"])
 
 
 def _title(name):
@@ -184,7 +248,7 @@ def items(ws=None):
                 continue
             if ws is not None and workspace_of(p.name, index) != ws:
                 continue
-            t = best_transcript(p.name)
+            t = best_transcript(p.name, named=False)
             stats = (t or {}).get("stats", {})
             out.append({
                 "name": p.name,
@@ -229,6 +293,12 @@ def export_handoff(name):
         "transcript_language": "English (translated by Whisper)" if s.get("task") == "translate" else "as spoken",
         "transcribed_with": f"whisper-{s.get('model')} + pyannote community-1",
     }
+    named = speaker_names(name)
+    if named:  # the lines already carry these names; said here so the model trusts them
+        meta["named_voices"] = ", ".join(f"{who} (was {label})" for label, who in sorted(named.items()))
+    me = str(settings.get("recording").get("your_name") or "").strip()
+    if me:
+        meta["recorded_by"] = f"{me} (made this recording and is one of the speakers)"
     body = "\n".join(f"[{_fmt(l['start'])}] {l['speaker']}: {l['text']}" for l in t["lines"])
     text = "---\n" + "\n".join(f"{k}: {v}" for k, v in meta.items()) + "\n---\n\n# Transcript\n\n" + body + "\n"
     (LLM_INBOX / f"{name}.md").write_text(text)

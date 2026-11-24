@@ -540,6 +540,11 @@ _FILLER = re.compile(r"(?i)^(?:(?:he|she|they|was|is|were|only|just|briefly|also
                      r"discussion|name))?\s*\.?$")
 
 
+# a note that only records that someone came up ("Mentioned as the person X sat with", "Addressed by Y to ...")
+_PASSING = re.compile(r"(?i)^(?:(?:he|she|they|was|is|were|only|just|briefly|also)\s+)*(?:mentioned|addressed|"
+                      r"referred to|named|greeted|thanked|called out|asked (?:to|not to))\b")
+
+
 def _similar(a, b):
     """Two points saying the same: one contains the other (4+ words), 70% of their words are shared, or
     they are 85% alike as text."""
@@ -609,13 +614,25 @@ def check_people(notes, transcript):
         toks = [t for t in _norm(name).split() if len(t) >= 3]
         return any(t in words or any(_close(t, w) for w in words if w[:1] == t[:1]) for t in toks)
 
+    lines = [_norm(l) for l in transcript.splitlines()]
+    voices = {_norm(m.group(1)) for m in re.finditer(r"(?m)^\[[\d:]+\] ([^:\n]+):", transcript)}
+
+    def times_said(name):
+        toks = [t for t in _norm(name).split() if len(t) >= 3]
+        return sum(1 for l in lines if any(t in l.split() or any(_close(t, w) for w in l.split() if w[:1] == t[:1])
+                                           for t in toks))
+
     def concrete(p):
         if any(_known(p.get(f)) for f in ("role", "organisation", "reports_to")):
             return True
         if _norm(p.get("name")) in owners or any(o and o in _norm(p.get("name")).split() for o in owners):
             return True
         sents = [x for x in re.split(r";\s+|(?<=[.!?])\s+", str(p.get("notes") or "")) if x.strip(" .;")]
-        return any(not _FILLER.match(x.strip()) for x in sents)
+        real = [x for x in sents if not _FILLER.match(x.strip())]
+        if real and _norm(p.get("name")) not in voices and times_said(p.get("name")) <= 1 \
+                and all(_PASSING.match(x.strip()) for x in real):
+            return False  # named once, in passing: "Mentioned as the person X sat with"
+        return bool(real)
 
     kept, dropped = [], []
     for p in notes.get("people") or []:
@@ -643,6 +660,39 @@ def check_owners(notes):
             a["owner"] = "unassigned"
             changed.append(a.get("task"))
     return changed
+
+
+_SPEAKER = re.compile(r"(?i)\bspeaker[ _]?\d+\b('s)?")
+
+
+def drop_speaker_labels(notes):
+    """No SPEAKER_nn in the notes: a voice label means nothing to a reader and is easily the wrong person.
+    An owner that is a label becomes "unassigned"; in text, "a participant". Name the voices (the
+    meeting's Speakers box) to get names instead. Returns the number of labels replaced."""
+    count = [0]
+
+    def fix(text):
+        def one(m):
+            count[0] += 1
+            start = m.start() == 0 or text[:m.start()].rstrip().endswith((".", "!", "?", ":"))
+            return ("A" if start else "a") + " participant" + (m.group(1) or "")
+        return _SPEAKER.sub(one, text)
+
+    for a in notes.get("action_items") or []:
+        if isinstance(a, dict) and _SPEAKER.fullmatch(str(a.get("owner") or "").strip()):
+            a["owner"] = "unassigned"
+            count[0] += 1
+    for key in ("title", "summary", "decisions", "open_questions"):
+        if isinstance(notes.get(key), str):
+            notes[key] = fix(notes[key])
+        elif isinstance(notes.get(key), list):
+            notes[key] = [fix(x) if isinstance(x, str) else x for x in notes[key]]
+    for item in (notes.get("people") or []) + (notes.get("action_items") or []):
+        if isinstance(item, dict):
+            for k in ("notes", "task"):
+                if isinstance(item.get(k), str):
+                    item[k] = fix(item[k])
+    return count[0]
 
 
 def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
@@ -692,6 +742,7 @@ def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
     repeats = dedupe_notes(notes)
     check_hierarchy(notes)
     owners = check_owners(notes)
+    unlabelled = drop_speaker_labels(notes)
     dropped = drop_sensitive(notes)
     notes["_meta"]["reasoning_effort"] = cfg.get("reasoning_effort") or None
     if cleared:
@@ -704,6 +755,8 @@ def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
         notes["_meta"]["people_dropped"] = people_dropped
     if repeats:
         notes["_meta"]["repeats_removed"] = repeats
+    if unlabelled:
+        notes["_meta"]["speaker_labels_replaced"] = unlabelled
     if raw is not None:
         notes["labels"] = raw
     return notes

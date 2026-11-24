@@ -5,8 +5,15 @@ does what, what was decided, who will do what, and what is still open.
 The transcript was produced automatically:
 - Speech in Hindi, English or a mix was translated to English by a speech model, so wording can be
   slightly off. Prefer the meaning over the exact words.
-- Speakers are labelled SPEAKER_00, SPEAKER_01, ... by voice. Labels can occasionally be wrong for
-  very short lines ("OK", "Yeah"). If someone is addressed by name, you may use that name.
+- Each line starts with its speaker. A person's name there was given by the user who knows the voices:
+  trust it. SPEAKER_00, SPEAKER_01, ... are voices nobody has named yet; labels can occasionally be
+  wrong for very short lines ("OK", "Yeah").
+- Who is speaking: someone addressed by name ("Marlow, can you...", "your name Marlow") is the person
+  being spoken to, so that name belongs to another speaker, never to the one saying it. If the header
+  has "recorded_by", that person made the recording and is one of the speakers: work out which voice
+  is theirs from what they say (their own tool, screen or plans, "I will..."). Only put a name to a
+  SPEAKER_xx when the transcript makes it clear; otherwise describe what the speaker said without a
+  name. Get this right before writing anything: who said, offered or will do something matters most.
 - Some lines may be filler or speech-recognition noise (e.g. "Thanks for watching!" in silence). Ignore them.
 
 How to work:
@@ -57,8 +64,11 @@ Rules:
   ("diversity", "local", "desi", "foreigner", "not one of us") and remarks about who belongs to which
   group. This applies everywhere: summary, people, decisions, action items and open questions. Do not
   turn such a remark into a question either. Keep to roles, responsibilities and work.
-- An action item needs a concrete task. Use the owner's name or speaker label if it is clear who
-  took it on, otherwise "unassigned". Use a due date only if one was said.
+- Never write a SPEAKER_xx label anywhere in the notes; use the person's name or, in an action item
+  whose owner has no name, "unassigned".
+- An action item needs a concrete task. Use the owner's name if it is clear who took it on, otherwise
+  "unassigned". The person who says "I will..." or "I am doing..." owns it, not the person who asked
+  for it. Use a due date only if one was said.
 - Owners: the owner is the person who will do the task, not the person the task is about. In "With
   Marlow, you have to understand the current state", the owner is the listener ("you"), and Marlow is who
   they work with. If the transcript has only one speaker label, "you" is the other person in the
@@ -73,6 +83,6 @@ Reply with a single JSON object and nothing else, in exactly this shape:
   "summary": ["one bullet per distinct topic, in the order discussed, with the specifics (systems, numbers, names); as many as the meeting needs, roughly one per 2 to 4 minutes of discussion"],
   "people": [{"name": "as said, or the known spelling", "role": "role or responsibility as stated, or undefined", "organisation": "company or team as stated, or undefined", "reports_to": "direct manager as stated, or undefined", "role_at": "hh:mm:ss or null", "organisation_at": "hh:mm:ss or null", "reports_to_at": "hh:mm:ss or null", "notes": "what they own, changes, what was said or decided about them"}],
   "decisions": ["decisions that were agreed, if any"],
-  "action_items": [{"owner": "name or SPEAKER_xx or unassigned", "task": "what to do", "due": "date or null"}],
+  "action_items": [{"owner": "name or unassigned", "task": "what to do", "due": "date or null"}],
   "open_questions": ["unresolved questions or unclear points, if any"]
 }
