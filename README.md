@@ -249,6 +249,50 @@ uv run index.py search "what did the client ask for" --client Acme --kind action
 
 Changing the embedding model needs `uv run index.py reset` and a backfill (vectors of two models don't mix).
 
+## MCP server (meetings for Claude and other MCP clients)
+
+`./stt-lab up` also starts an MCP server in Docker on **http://127.0.0.1:8765/mcp** (this Mac only). It
+reads the search index with a read-only database login, and works inside one workspace per call (the
+active one unless `workspace` is given), so firms are never mixed in an answer.
+
+| Tool | What it gives |
+|---|---|
+| `list_workspaces` | Workspaces, their meeting counts and date range, the active one, today's date |
+| `list_meetings` | Meetings by date phrase (`yesterday`, `2 days ago`, `last week`, `monday`, ISO dates or ranges), client, project, person, type |
+| `get_meeting` | One meeting's summary, decisions, action items, open questions and labels |
+| `get_transcript` | The full transcript as `[mm:ss] SPEAKER: text`, in pages for long meetings |
+| `search` | Search by meaning across the workspace's notes and transcript passages, with filters |
+| `action_items` | Action items in a period, by owner, client or project |
+| `registry` | Known clients, projects, people and topics with their correct spellings |
+
+Prompts (ready-made workflows the client can offer): **meetings_digest** (insights, decisions and action
+items for a day or period), **feature_requirements** (a 1 to 5 page requirements document from one or more
+meetings, every requirement traced to a meeting and timestamp), **client_brief**, **action_tracker**.
+
+Connect a client:
+
+```bash
+# Claude Code (all projects)
+claude mcp add --transport http --scope user stt-lab http://127.0.0.1:8765/mcp
+```
+
+Claude Desktop: Settings → Developer → Edit Config, add a local bridge to the HTTP server:
+
+```json
+{ "mcpServers": { "stt-lab": { "command": "npx", "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp"] } } }
+```
+
+Then ask, for example, "what were the action items from my meetings yesterday?" or use the
+`feature_requirements` prompt with the meetings' names.
+
+- **Time zone:** `./stt-lab up` passes the Mac's time zone, so "yesterday" is your yesterday.
+- **Token (optional):** set `STT_MCP_TOKEN` (e.g. in `.env`) and clients must send
+  `Authorization: Bearer <token>` (`claude mcp add ... --header "Authorization: Bearer <token>"`).
+- **ChatGPT:** its MCP connectors run from OpenAI's servers, so they can't reach a server on
+  `127.0.0.1`. That needs a public HTTPS tunnel with authentication, which puts your meeting data on the
+  internet; not set up here.
+- **Read-only:** the server's database role can only `SELECT`; it can't change the index or the app.
+
 ## How it works
 
 ### File mode (upload, YouTube, Transcribe button)
@@ -368,7 +412,8 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `scripts/repo_guard.py`, `.githooks/pre-commit`, `.github/workflows/repo-guard.yml` | Pre-commit and CI checks: audio only as `recordings/sample-*`, at most 10 minutes |
 | `labels.py`, `prompts/meeting_labels.md` | Meeting labels, workspaces and registries; `registry/` and `llm/labels/` hold the data (git-ignored) |
 | `index.py` | Search index: confirmed meetings as passages with embeddings in Postgres (pgvector) |
-| `docker-compose.yml`, `stt-lab` | The index database container, and the one-command launcher (`./stt-lab up`) |
+| `docker-compose.yml`, `stt-lab` | The index database and MCP server containers, and the one-command launcher (`./stt-lab up`) |
+| `mcp_server/` | MCP server (tools and prompts over the index), its Dockerfile, and `shared.py` (what the indexer and server agree on) |
 | `settings.json` | All settings, one section per feature, edited in the Settings tab; defaults in `settings.py` (git-ignored; replaces the older `llm.json`, which is moved in automatically) |
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
 | `summarise.py` | LLM summariser (OpenAI-compatible API) and its CLI |

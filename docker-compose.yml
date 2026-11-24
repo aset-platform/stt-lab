@@ -1,6 +1,5 @@
-# The meeting index: Postgres with pgvector. Only the database runs in Docker; the app and Ollama run
-# natively so they can use the Apple GPU (a Linux container on macOS cannot). Start everything with
-# ./stt-lab up
+# The meeting index (Postgres + pgvector) and the MCP server that reads it. The app and Ollama run natively
+# so they can use the Apple GPU (a Linux container on macOS cannot). Start everything with ./stt-lab up
 services:
   db:
     image: pgvector/pgvector:0.8.0-pg17
@@ -19,6 +18,32 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  mcp:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    image: stt-lab-mcp:latest
+    container_name: stt-lab-mcp
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # read-only login: the MCP server can't change the index
+      STT_MCP_DB_URL: postgresql://sttlab_mcp:${STT_MCP_DB_PASSWORD:-sttlab_mcp}@db:5432/${STT_DB_NAME:-sttlab}
+      STT_EMBED_URL: http://host.docker.internal:11434   # Ollama on the Mac, to embed questions
+      STT_TZ: ${STT_TZ:-UTC}                               # ./stt-lab up passes the Mac's time zone
+      STT_MCP_TOKEN: ${STT_MCP_TOKEN:-}                    # optional bearer token
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${STT_MCP_PORT:-8765}:8765"  # this Mac only
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 8765), 2)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   stt-lab-pgdata:

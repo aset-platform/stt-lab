@@ -43,6 +43,7 @@ DEFAULTS = {
         # docker-compose.yml's database; STT_DB_URL in the environment overrides it
         "database_url": "postgresql://sttlab:sttlab@127.0.0.1:5433/sttlab",
         "embed_url": "http://127.0.0.1:11434",  # Ollama's native API
+        "mcp_db_password": "sttlab_mcp",  # the MCP server's read-only login (STT_MCP_DB_PASSWORD overrides)
         "embed_model": "qwen3-embedding:0.6b",
         "chunk_seconds": 60,       # transcript passages of about a minute
         "chunk_max_chars": 2000,   # a dense minute is cut earlier; an over-long line is split at sentences
