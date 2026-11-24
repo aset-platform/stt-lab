@@ -225,7 +225,7 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
           <option selected>medium</option></select></label>
         <label title="Language being spoken; auto detects it per chunk">Spoken <select id="lang"><option value="">auto</option><option value="en">English</option><option value="hi">Hindi</option></select></label>
         <label>Output <select id="task"><option value="translate" selected>English</option><option value="transcribe">As spoken</option></select></label>
-        <label>Speakers <input id="speakers" type="number" min="0" max="20" value="0" style="width:60px" title="0 = detect automatically"></label>
+        <label>Speakers <input id="speakers" type="number" min="0" max="20" value="2" style="width:60px" title="Number of people speaking; 0 = detect automatically"></label>
         <button class="primary" id="go" disabled>Transcribe</button>
         <label style="margin-left:auto"><input type="checkbox" id="follow" checked> Follow playback</label>
         <button id="copyTranscript" disabled title="Copy the transcript with times and speakers">Copy transcript</button>
@@ -369,6 +369,14 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
       <h2>Summariser model</h2>
       <p class="hint" id="llmServer"></p>
       <div id="modelTable"><p class="meta">Loading models…</p></div>
+    </div>
+    <div class="panel">
+      <h2>Queue</h2>
+      <div class="setting"><div class="what"><b>Summarise the queue automatically</b>
+        <p class="hint">Anything in “To summarise” is summarised on its own, oldest first, one at a time. It only starts
+          while nothing is recording or transcribing, and if a recording starts it pauses after the current part
+          (about 1 min) and goes on when the recording is done. Off: only the “Summarise queued” button runs it.</p></div>
+        <input type="checkbox" data-set="llm.auto_pickup"></div>
     </div>
     <div class="panel">
       <h2>Memory</h2>
@@ -521,6 +529,7 @@ function transcribe({ auto = false } = {}) {
       loadList();
       if (!auto) finish();  // with auto-summary the stream stays open for the summary result
     } else if (ev.type === "summary_done") { setStatus(summaryMsg(ev)); finish(); }
+    else if (ev.type === "summary_queued") { setStatus(ev.message); loadList(); finish(); }
     else if (ev.type === "summary_error") { setStatus(ev.message, true); finish(); }
     else if (ev.type === "error") { setStatus(ev.message, true); finish(); }
   };
@@ -755,6 +764,7 @@ async function startLive(fromTab) {
                      : `Live session saved as ${ev.recording}. Transcript improved and speakers labelled.`);
       if (!auto) finished = true;
     } else if (ev.type === "summary_done") { finished = true; setStatus(summaryMsg(ev)); }
+    else if (ev.type === "summary_queued") { finished = true; setStatus(ev.message); }
     else if (ev.type === "summary_error") { finished = true; setStatus(ev.message, true); }
     else if (ev.type === "error") { finished = true; setStatus(ev.message, true); stop(); }
   };
@@ -955,6 +965,16 @@ $("search").oninput = () => {
 };
 $("search").onkeydown = (e) => { if (e.key === "Escape") { clearSearch(); loadLibrary(); } };
 
+// a summary's "people" entry, {name, role, notes}, as one line (plain strings from older replies pass through)
+// same shape as summarise._person: role, organisation and manager in brackets only when stated
+const known = (v) => typeof v === "string" && v.trim() && !/^(undefined|unknown|unclear|n\/a|none|null)$/i.test(v.trim()) ? v.trim() : "";
+const personLine = (p) => {
+  if (typeof p === "string") return p;
+  const role = known(p.role), org = known(p.organisation), boss = known(p.reports_to);
+  const head = [role, org].filter(Boolean).join(" · ") + ((role || org) && boss ? ", " : "") + (boss ? `reports to ${boss}` : "");
+  return `${p.name || "?"}${head ? ` (${head})` : ""}${p.notes ? `: ${p.notes}` : ""}`;
+};
+
 async function renderDetail() {
   const it = lib.items.find((i) => i.name === focus);
   if (!it) { $("detail").innerHTML = '<div class="empty">Select a recording to see its details and summary.</div>'; return; }
@@ -967,17 +987,22 @@ async function renderDetail() {
   $("detail").innerHTML = `<h3>${esc(it.name)}</h3><div class="meta">${esc(meta)}</div>${body}`;
   if (!it.summary) { if (it.queued) addLabelBox(it); return renderCompare(it); }
   try {
-    const { data, markdown } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
+    const { data, markdown, missing_names } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
     if (focus !== it.name) return;
     const list = (xs) => xs?.length ? `<ul>${xs.map((x) => `<li>${hl(String(x))}</li>`).join("")}</ul>` : "<p class='meta'>None.</p>";
     $("detail").innerHTML = `<span class="dtools"><button id="copySummary" title="Copy the summary as Markdown">Copy summary</button></span>` +
       `<h3>${hl(data?.title || it.name)}</h3><div class="meta">${esc(it.name)} · ${esc(meta)}` +
       (data?._meta ? ` · summarised by ${esc(data._meta.model)} in ${data._meta.seconds}s` : "") + "</div>" +
-      (data ? `<h4>Summary</h4>${list(data.summary)}<h4>Decisions</h4>${list(data.decisions)}
+      (data ? `<h4>Summary</h4>${list(data.summary)}${data.people?.length ? `<h4>People</h4>${list(data.people.map(personLine))}` : ""}<h4>Decisions</h4>${list(data.decisions)}
                <h4>Action items</h4>${list((data.action_items || []).map((a) => `${a.owner || "unassigned"}: ${a.task}${a.due ? ` (due ${a.due})` : ""}`))}
                <h4>Open questions</h4>${list(data.open_questions)}`
             : `<pre style="white-space:pre-wrap">${esc(markdown)}</pre>`);
     $("copySummary").onclick = (e) => copyText(markdown, e.currentTarget);
+    const gaps = (missing_names || []).filter((g) => g.mentions >= 3);
+    if (gaps.length) $("detail").querySelector("h4")?.insertAdjacentHTML("beforebegin",
+      `<p class="hint" style="border-left:3px solid var(--danger);padding-left:8px">Said in the meeting but not in this summary:
+        ${gaps.slice(0, 12).map((g) => `<b>${esc(g.name)}</b> (${g.mentions}×, from ${esc(g.first_at)})`).join(", ")}.
+        Some are just terms; a missing person or client usually means a gap. Check the transcript or re-summarise.</p>`);
     addFixBox(it);
   } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
   addLabelBox(it);
@@ -1049,7 +1074,7 @@ async function renderCompare(it) {
           ${(r.action_items || []).length} actions · ${(r.open_questions || []).length} questions</span>
       </div>
       <b>${esc(r.title || "")}</b>
-      <h4>Summary</h4>${list(r.summary)}<h4>Decisions</h4>${list(r.decisions)}
+      <h4>Summary</h4>${list(r.summary)}${r.people?.length ? `<h4>People</h4>${list(r.people.map(personLine))}` : ""}<h4>Decisions</h4>${list(r.decisions)}
       <h4>Action items</h4>${list((r.action_items || []).map((a) => `${a.owner || "unassigned"}: ${a.task}${a.due ? ` (due ${a.due})` : ""}`))}
       <h4>Open questions</h4>${list(r.open_questions)}</div>`;
   };
@@ -1080,7 +1105,10 @@ async function loadLlm() {
   llm = s;
   $("llmChip").className = "chip " + (s.ok ? "ok" : "bad");
   $("llmChip").textContent = s.ok ? `${s.model} ready` : "LLM not connected";
-  $("llmMsg").innerHTML = esc(s.ok ? `${s.queued.length} transcript(s) queued.` :
+  const a = s.auto || {};
+  const autoMsg = a.running ? (a.paused ? ` Summarising ${a.running}: paused while recording.` : ` Summarising ${a.running}…`)
+    : a.on && s.queued.length ? " They are summarised automatically when nothing is recording." : "";
+  $("llmMsg").innerHTML = esc(s.ok ? `${s.queued.length} transcript(s) queued.${autoMsg}` :
     `${s.message}. Queued transcripts wait in llm/inbox/ until it is available.`) +
     ' <a class="cfglink" style="color:var(--accent);cursor:pointer">Change model in Settings</a>';
   $("llmMsg").querySelector(".cfglink").onclick = () => showView("viewSettings");
@@ -1095,7 +1123,7 @@ async function loadLlm() {
 }
 
 // ---------- settings ----------
-let cfg = { recording: { live_transcript: true, auto_summarise: true }, transcription: { language: "", task: "translate", speakers: 0 }, llm: {} };
+let cfg = { recording: { live_transcript: true, auto_summarise: true }, transcription: { language: "", task: "translate", speakers: 2 }, llm: {} };
 
 function applySettings() {  // reflect settings in the other tabs
   const r = cfg.recording, on = (b) => b ? "on" : "off";

@@ -23,10 +23,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import labels
 import library
+from mcp_server import guardrails
 import settings
 
 ROOT = Path(__file__).parent
@@ -190,6 +192,54 @@ def _parse_json(text):
     return json.loads(m.group(0))
 
 
+UNDEFINED = "undefined"
+
+
+def _known(v):
+    """A people field the model filled from the transcript ("", None and "undefined" are not)."""
+    v = (v or "").strip() if isinstance(v, str) else ""
+    return "" if v.lower() in ("undefined", "unknown", "unclear", "n/a", "none", "null") else v
+
+
+def _person(p):
+    """One "people" entry as a line: "Name (role · organisation, reports to X): notes". A role the meeting
+    didn't establish shows as "role undefined"; organisation and manager are only shown when stated.
+    Older or odd replies may give plain strings."""
+    if not isinstance(p, dict):
+        return str(p)
+    role, org, boss = _known(p.get("role")), _known(p.get("organisation")), _known(p.get("reports_to"))
+    notes = (p.get("notes") or "").strip()
+    head = " · ".join(x for x in (role, org) if x) + (", " if (role or org) and boss else "") + \
+        (f"reports to {boss}" if boss else "")
+    return f"**{p.get('name') or '?'}**" + (f" ({head})" if head else "") + (f": {notes}" if notes else "")
+
+
+def check_hierarchy(notes):
+    """Reporting lines must form a tree. Where reports_to loops (A > B > A, or longer), the model mixed
+    up the direction: clear those reports_to to "undefined" and say so under open questions, rather than
+    publish a hierarchy that contradicts itself. Returns the names whose line was cleared."""
+    people = [p for p in notes.get("people") or [] if isinstance(p, dict)]
+    key = lambda n: " ".join((n or "").lower().split())
+    boss = {key(p.get("name")): key(_known(p.get("reports_to"))) for p in people if _known(p.get("reports_to"))}
+    looped = set()
+    for start in boss:
+        seen, n = [], start
+        while n in boss and n not in seen:
+            seen.append(n)
+            n = boss[n]
+        if n in seen:  # walked back into the chain: everything from n onward is a loop
+            looped |= set(seen[seen.index(n):])
+    cleared = []
+    for p in people:
+        if key(p.get("name")) in looped:
+            cleared.append(p.get("name"))
+            p["reports_to"] = UNDEFINED
+    if cleared:
+        notes.setdefault("open_questions", []).append(
+            "Reporting line unclear: " + ", ".join(cleared) + " (the notes had them reporting to each other).")
+    return cleared
+
+
 def to_markdown(name, notes, model):
     def section(title, items):
         return f"## {title}\n\n" + ("\n".join(f"- {i}" for i in items) if items else "_None._") + "\n"
@@ -197,6 +247,7 @@ def to_markdown(name, notes, model):
                for a in notes.get("action_items", [])]
     return (f"# {notes.get('title') or name}\n\n_Recording: {name} · summarised by {model}_\n\n"
             + section("Summary", notes.get("summary", [])) + "\n"
+            + (section("People", [_person(x) for x in notes["people"]]) + "\n" if notes.get("people") else "")
             + section("Decisions", notes.get("decisions", [])) + "\n"
             + section("Action items", actions) + "\n"
             + section("Open questions", notes.get("open_questions", [])))
@@ -220,13 +271,24 @@ def _summarise(cfg, model, name, transcript, prompt, timeout=None):
     if len(transcript) / 4 > cfg["max_input_tokens"]:  # ~4 characters per token
         raise library.LibraryError(f"transcript is ~{len(transcript) // 4} tokens, over max_input_tokens")
     t0 = time.perf_counter()
-    reply = _request(cfg, "/chat/completions", {
+    payload = {
         "model": model,
         "messages": [{"role": "system", "content": prompt},
                      {"role": "user", "content": transcript}],
         "temperature": 0.2,
         #"response_format": {"type": "json_object"},
-    }, timeout=timeout or cfg["timeout_s"])
+    }
+    if _ollama_url(cfg):  # a long summary makes several calls; don't let Ollama unload in between
+        payload["keep_alive"] = cfg.get("keep_alive") or "30m"
+    if cfg.get("reasoning_effort"):  # how long a thinking model thinks; others are sent nothing
+        payload["reasoning_effort"] = cfg["reasoning_effort"]
+    try:
+        reply = _request(cfg, "/chat/completions", payload, timeout=timeout or cfg["timeout_s"])
+    except urllib.error.HTTPError as e:
+        if e.code != 400 or "reasoning_effort" not in payload:
+            raise
+        payload.pop("reasoning_effort")  # a model without thinking can refuse the option: ask again without it
+        reply = _request(cfg, "/chat/completions", payload, timeout=timeout or cfg["timeout_s"])
     seconds = round(time.perf_counter() - t0, 1)
     mem = memory(cfg, model)  # read while the model is still loaded
     # Servers like Ollama silently cut the input to their context window (default 4096 tokens), and the
@@ -247,7 +309,309 @@ def _summarise(cfg, model, name, transcript, prompt, timeout=None):
     return notes
 
 
-def summarise_one(name, model=None):
+PART_NOTE = """
+
+This meeting is long, so its transcript comes in parts and you are writing the notes for ONE part. The
+parts' notes are joined afterwards in order, so cover only what is said in this part, with the same
+rules and the same JSON shape; don't summarise earlier parts again. "People established in earlier
+parts", when given, is context for knowing who someone is: list a person again only if this part adds
+something about them. When this part states or confirms someone's role, organisation or manager
+(including someone already listed, whose field may still be "undefined"), fill that field with the time
+of the line in this part, even if an earlier part already had it. The title should describe the meeting
+as far as this part shows.
+"""
+_LINE_T = re.compile(r"^\[(\d+):(\d\d):(\d\d)\]", re.M)
+
+
+def _secs(t):
+    """"hh:mm:ss" or "mm:ss" -> seconds, else None."""
+    m = re.fullmatch(r"\s*\[?(?:(\d+):)?(\d{1,2}):(\d\d)\]?\s*", str(t or ""))
+    return int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) if m else None
+
+
+def split_transcript(transcript, minutes):
+    """The handoff markdown (header, then "[hh:mm:ss] SPEAKER: text" lines) as parts of about `minutes`
+    each: [(header, part_text, start_s, end_s)]. One part when the meeting is short enough; a last part
+    of under a third of `minutes` joins the one before it."""
+    head, sep, body = transcript.partition("# Transcript\n")
+    if not sep or not minutes:
+        return [(transcript, "", 0, 0)]
+    lines = [l for l in body.strip("\n").split("\n") if l.strip()]
+    times = [(_secs(m.group(0)) if (m := _LINE_T.match(l)) else None) for l in lines]
+    span = minutes * 60
+    groups, start = [[]], None
+    for line, t in zip(lines, times):
+        if t is not None:
+            start = t if start is None else start
+            if t - start >= span and groups[-1]:
+                groups.append([])
+                start = t
+        groups[-1].append((line, t))
+    if len(groups) > 1:
+        last = [t for _, t in groups[-1] if t is not None]
+        if not last or last[-1] - last[0] < span / 3:
+            groups[-2] += groups.pop()
+    out = []
+    for g in groups:
+        ts = [t for _, t in g if t is not None]
+        out.append((head + sep, "\n".join(l for l, _ in g), ts[0] if ts else 0, ts[-1] if ts else 0))
+    return out
+
+
+def _norm(x):
+    return " ".join(re.sub(r"[^\w\s]", " ", str(x).lower()).split())
+
+
+def merge_parts(parts):
+    """Join per-part notes in order, in code (no extra LLM call): lists concatenated without repeats,
+    people merged by name (a field stated in any part wins over "undefined"; two different managers for
+    one person become "undefined" plus an open question), labels combined."""
+    out = {"title": next((p.get("title") for p in parts if p.get("title")), ""), "summary": [], "people": [],
+           "decisions": [], "action_items": [], "open_questions": []}
+    seen = {k: set() for k in out if k not in ("title", "people")}
+    people, conflicts = {}, []
+    for part in parts:
+        for key in seen:
+            for x in part.get(key) or []:
+                k = _norm(json.dumps(x, sort_keys=True) if isinstance(x, dict) else x)
+                if k and k not in seen[key]:
+                    seen[key].add(k)
+                    out[key].append(x)
+        for p in part.get("people") or []:
+            if not isinstance(p, dict) or not p.get("name"):
+                continue
+            k = _norm(p["name"])
+            if k not in people:
+                people[k] = dict(p)
+                continue
+            have = people[k]
+            for f in ("role", "organisation", "reports_to"):
+                new, old = _known(p.get(f)), _known(have.get(f))
+                if new and not old:
+                    have[f], have[f + "_at"] = new, p.get(f + "_at")
+                elif new and old and _norm(new) != _norm(old):
+                    if f == "reports_to":
+                        conflicts.append(f"{have['name']}: reports to {old} or {new}?")
+                        have[f], have[f + "_at"] = UNDEFINED, None
+                    elif f == "role" and _norm(new) not in _norm(old):  # roles can change in a meeting
+                        have[f] = f"{old}; {new}"
+            notes = [n for n in (have.get("notes"), p.get("notes")) if n and str(n).strip()]
+            have["notes"] = "; ".join(dict.fromkeys(str(n).strip() for n in notes))
+    out["people"] = list(people.values())
+    out["open_questions"] += [f"Reporting line unclear: {c}" for c in conflicts]
+    labs = [p["labels"] for p in parts if isinstance(p.get("labels"), dict)]
+    if labs:
+        types = [str(l.get("type") or "") for l in labs if l.get("type")]
+        merged = {"type": max(set(types), key=types.count) if types else ""}
+        for f in ("clients", "projects", "people", "topics"):
+            vals = [v for l in labs for v in (l.get(f) or []) if isinstance(v, str)]
+            merged[f] = list(dict.fromkeys(vals))[:8 if f == "topics" else None]
+        out["labels"] = merged
+    return out
+
+
+_GENERIC = set("the and for with team lead head owner senior member of new main key".split())
+
+
+def _close(a, b):
+    """Two spellings of one name as speech recognition gives them ("Tamsen"/"Tamsin", "Marlo"/"Marlow")."""
+    return a == b or (len(a) > 3 and len(b) > 3 and a[0] == b[0] and SequenceMatcher(None, a, b).ratio() >= 0.8)
+
+
+def check_evidence(notes, transcript, ws=None):
+    """Clear a person's role, organisation or manager unless the model cited the transcript line that
+    states it: the cited time must be a real line, and the person (any registry spelling) must be named
+    within the 90 s before it or 30 s after (so "So he is the product manager" counts after "Tamsin...").
+    Returns ["name: field", ...] for what was cleared."""
+    lines = [(_secs(m.group(0)), l) for l in transcript.split("\n") if (m := _LINE_T.match(l))]
+    spellings = {}
+    if ws and labels.exists(ws):
+        for e in labels.load(ws)["entities"]:
+            spellings[_norm(e["name"])] = [e["name"], *e.get("aliases", [])]
+    cleared = []
+    for p in notes.get("people") or []:
+        if not isinstance(p, dict):
+            continue
+        names = spellings.get(_norm(p.get("name")), [p.get("name") or ""])
+        words = {w for n in names for w in _norm(n).split() if len(w) > 2}
+        for f in ("role", "organisation", "reports_to"):
+            if not _known(p.get(f)):
+                continue
+            t = _secs(p.get(f + "_at"))
+            near = [l for s, l in lines if t is not None and t - 90 <= s <= t + 30]
+            said = {w for l in near for w in _norm(l).split()}
+            # the value must be said there too: a content word of it, matched on its first 5 letters
+            # ("architects" backs "Architect"); for reports_to that is the manager's name
+            forms = spellings.get(_norm(p[f]), [p[f]]) if f == "reports_to" else [p[f]]
+            value = {w[:5] for v in forms for w in _norm(v).split() if len(w) > 2 and w not in _GENERIC}
+            if f == "role" and not value:  # only generic words ("Team Member", "Lead"): says nothing
+                p[f], p[f + "_at"] = UNDEFINED, None
+                cleared.append(f"{p.get('name')}: {f}")
+                continue
+            if f == "reports_to":  # a name: close spellings count, as for the person
+                backed = any(_close(w, x) for v in forms for w in _norm(v).split() if len(w) > 2 for x in said)
+            else:
+                backed = not value or bool(value & {w[:5] for w in said})
+            # a company is usually set for the whole conversation, so for organisation the company named at
+            # the cited line is enough; a role or a manager must also be said near the person's name
+            ok = t is not None and any(abs(s - t) <= 15 for s, _ in lines) and backed and \
+                (f == "organisation" or any(_close(w, x) for w in words for x in said))
+            if not ok:
+                p[f], p[f + "_at"] = UNDEFINED, None
+                cleared.append(f"{p.get('name')}: {f}")
+    return cleared
+
+
+def _people_context(notes):
+    def row(p):
+        cited = ", ".join(f"{f} {_known(p.get(f))} [{p.get(f + '_at')}]" for f in ("role", "organisation", "reports_to")
+                          if _known(p.get(f)))
+        return f"{p.get('name')}: {cited or 'role, organisation and manager not yet stated'}" + \
+            (f". {p['notes']}" if p.get("notes") else "")
+    rows = [row(p) for p in notes.get("people") or [] if isinstance(p, dict)]
+    return "People established in earlier parts:\n" + "\n".join(f"- {r}" for r in rows) + "\n\n" if rows else ""
+
+
+TIDY_FILE = ROOT / "prompts" / "meeting_tidy.md"
+def drop_sensitive(notes):
+    """Remove sentences the guardrails match (deal figures and terms, remarks about race, origin or private
+    life, swearing and insults) from every text in the notes, whatever the model wrote. The MCP server
+    runs the same filter on everything it sends out. Returns how many sentences were removed."""
+    count = [0]
+
+    def clean(text):
+        parts = re.split(r"(?<=[.;!?])\s+", text)
+        keep = [x for x in parts if not guardrails.why(x)]
+        count[0] += len(parts) - len(keep)
+        return " ".join(keep).strip()
+
+    def walk(x, key=""):
+        if isinstance(x, str):
+            return x if key.endswith("_at") or key in ("name", "_meta") else clean(x)
+        if isinstance(x, list):
+            return [v for v in (walk(v, key) for v in x) if v not in ("", None, {})]
+        if isinstance(x, dict):
+            return {k: (v if k == "_meta" else walk(v, k)) for k, v in x.items()}
+        return x
+    for key in ("title", "summary", "people", "decisions", "action_items", "open_questions"):
+        if key in notes:
+            notes[key] = walk(notes[key], key)
+    notes["action_items"] = [a for a in notes.get("action_items") or [] if not isinstance(a, dict) or a.get("task")]
+    return count[0]
+
+
+def tidy(cfg, model, name, notes):
+    """One short LLM call over the merged notes (not the transcript): merge repeats, join name variants.
+    Returns (tidied notes, _meta of the call); on any failure the merged notes are kept as they are."""
+    body = {k: notes[k] for k in ("title", "summary", "people", "decisions", "action_items", "open_questions")
+            if k in notes}
+    try:
+        out = _summarise(cfg, model, name, json.dumps(body, ensure_ascii=False, indent=1), TIDY_FILE.read_text())
+    except Exception as e:
+        print(f"{name}: tidy step failed, keeping the merged notes: {type(e).__name__}: {e}")
+        return notes, None
+    meta = out.pop("_meta", None)
+    if not isinstance(out.get("summary"), list) or not out["summary"]:
+        return notes, meta
+    tidied = {**notes, **{k: out[k] for k in body if k in out}}
+    _keep_verified(tidied, notes.get("people") or [])
+    return tidied, meta
+
+
+def _keep_verified(notes, verified):
+    """The tidy step may only reword: role, organisation and manager (with their times) come from the
+    checked entries, matched by name or, for a joined entry ("Orrin" + "Orrin Bexley"), by any name word."""
+    by = {}
+    for v in verified:
+        if isinstance(v, dict) and v.get("name"):
+            by.setdefault(_norm(v["name"]), []).append(v)
+    for p in notes.get("people") or []:
+        if not isinstance(p, dict):
+            continue
+        key = _norm(p.get("name"))
+        src = by.get(key) or [v for k, vs in by.items() for v in vs if set(k.split()) & set(key.split())]
+        for f in ("role", "organisation", "reports_to"):
+            known = next((v for v in src if _known(v.get(f))), None)
+            p[f], p[f + "_at"] = (known[f], known.get(f + "_at")) if known else (UNDEFINED, None)
+
+
+def check_owners(notes):
+    """An action item whose owner is named in the task itself ("Marlow: understand the current state with
+    Marlow") is about that person, not done by them: the owner becomes "unassigned". Returns the tasks changed."""
+    changed = []
+    for a in notes.get("action_items") or []:
+        if not isinstance(a, dict):
+            continue
+        owner = str(a.get("owner") or "").strip()
+        if not owner or owner.lower() == "unassigned" or re.fullmatch(r"(?i)speaker[ _]?\d+", owner):
+            continue
+        words = [w for w in _norm(owner).split() if len(w) > 2]
+        task = _norm(a.get("task") or "").split()
+        if any(_close(w, t) for w in words for t in task):
+            a["owner"] = "unassigned"
+            changed.append(a.get("task"))
+    return changed
+
+
+def make_notes(cfg, model, name, transcript, ws, log=print, pause=None):
+    """The notes for one transcript: a single LLM call for a short meeting, or one call per part of
+    llm.chunk_minutes, merged in code. Spelling, evidence and hierarchy checks run on the result.
+    `pause`, if given, is called before every call after the first: it can wait (a recording started).
+    Returns notes with "labels" (raw) still in them and _meta covering all calls."""
+    prompt = summary_prompt(ws)
+    parts = split_transcript(transcript, cfg.get("chunk_minutes") or 0)
+    if len(parts) == 1:
+        notes = _summarise(cfg, model, name, transcript, prompt)
+    else:
+        done, metas = [], []
+        for i, (head, text, a, b) in enumerate(parts, 1):
+            if pause and i > 1:
+                pause()
+            log(f"{name}: part {i}/{len(parts)} ({library._fmt(a)}-{library._fmt(b)})")
+            context = _people_context(merge_parts(done)) if done else ""
+            user = (f"{head}\nPART {i} OF {len(parts)} ({library._fmt(a)} to {library._fmt(b)})\n\n"
+                    f"{context}{text}\n")
+            n = _summarise(cfg, model, name, user, prompt + PART_NOTE)
+            metas.append(n.pop("_meta"))
+            n, _ = labels.respell(n, ws)
+            check_evidence(n, transcript, ws)  # before merging, so a field only travels with its line
+            done.append(n)
+        notes = merge_parts(done)
+        if pause:
+            pause()
+        log(f"{name}: tidying the joined notes")
+        notes, meta = tidy(cfg, model, name, notes)
+        if meta:
+            metas.append(meta)
+        usage = {k: sum((m.get("usage") or {}).get(k) or 0 for m in metas)
+                 for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+        secs = round(sum(m["seconds"] for m in metas), 1)
+        notes["_meta"] = {"model": model, "seconds": secs, "usage": usage, "memory": metas[-1].get("memory"),
+                          "calls": [{"seconds": m["seconds"], "tokens_per_s": m.get("tokens_per_s")} for m in metas],
+                          "tokens_per_s": round(usage["completion_tokens"] / secs, 1) if secs else None}
+    raw = notes.pop("labels", None)
+    notes["title"] = re.sub(r"\s*[(\[]?\bpart\s*\d+(\s*(of|/)\s*\d+)?[)\]]?\s*$", "", str(notes.get("title") or ""),
+                            flags=re.I).strip(" -–:")
+    notes, _ = labels.respell(notes, ws)  # names the model kept as heard, in the registry spelling
+    notes["people"] = [p for p in notes.get("people") or []
+                       if not (isinstance(p, dict) and re.fullmatch(r"(?i)speaker[ _]?\d+", str(p.get("name") or "").strip()))]
+    cleared = check_evidence(notes, transcript, ws)
+    check_hierarchy(notes)
+    owners = check_owners(notes)
+    dropped = drop_sensitive(notes)
+    notes["_meta"]["reasoning_effort"] = cfg.get("reasoning_effort") or None
+    if cleared:
+        notes["_meta"]["cleared_without_evidence"] = cleared
+    if dropped:
+        notes["_meta"]["sensitive_sentences_dropped"] = dropped
+    if owners:
+        notes["_meta"]["owner_unassigned"] = owners
+    if raw is not None:
+        notes["labels"] = raw
+    return notes
+
+
+def summarise_one(name, model=None, pause=None, log=print):
     """Summarise one queued transcript. Returns the parsed notes; raises on failure (input stays queued)."""
     cfg = config()
     model = model or cfg["model"]
@@ -257,12 +621,11 @@ def summarise_one(name, model=None):
         raise library.LibraryError(f"{name} is not queued; move it to 'To summarise' first")
     ws = labels.of(name)  # the recording's own workspace, whichever is selected in the header now
     try:
-        notes = _summarise(cfg, model, name, src.read_text(), summary_prompt(ws))
+        notes = make_notes(cfg, model, name, src.read_text(), ws, log=log, pause=pause)
     finally:
         if cfg["unload_after_summary"]:
             unload(model)
     raw = notes.pop("labels", None)
-    notes, _ = labels.respell(notes, ws)  # names the model kept as heard, in the registry spelling
     (library.LLM_SUMMARIES / f"{name}.json").write_text(json.dumps(notes, ensure_ascii=False, indent=1))
     (library.LLM_SUMMARIES / f"{name}.md").write_text(to_markdown(name, notes, model))
     src.rename(library.LLM_PROCESSED / src.name)
@@ -332,7 +695,7 @@ def _compare_path(name, model, ext):
 def compare_one(name, model):
     """Summarise a recording's transcript (queued or already summarised) with `model`, for comparison."""
     cfg = config()
-    notes = _summarise(cfg, model, name, _transcript(name), summary_prompt(labels.of(name)))
+    notes = make_notes(cfg, model, name, _transcript(name), labels.of(name))
     notes.pop("labels", None)  # same prompt as a real summary; labels aren't compared
     _compare_path(name, model, ".json").write_text(json.dumps(notes, ensure_ascii=False, indent=1))
     _compare_path(name, model, ".md").write_text(to_markdown(name, notes, model))

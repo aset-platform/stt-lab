@@ -6,6 +6,9 @@ stt-lab. Runs in Docker next to the index database (docker-compose.yml) on http:
     STT_MCP_DB_URL   read-only database login     STT_EMBED_URL  Ollama, for embedding questions
     STT_TZ           your time zone ("yesterday")  STT_MCP_TOKEN  optional: require "Authorization: Bearer <token>"
     STT_MCP_AUDIT    audit log file (one JSON line per tool call: client, tool, arguments, meetings shared)
+    STT_MCP_TRANSCRIPTS  "on" (default: transcripts shared, filtered) or "off" (notes only)
+Every answer passes through guardrails.py: deal figures and terms, remarks about race or origin, and abuse
+are replaced by "[removed]".
 """
 import os
 import secrets
@@ -16,7 +19,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from . import audit, store
+from . import audit, guardrails, store
+
+# "on": transcripts are shared, filtered line by line; "off": get_transcript and transcript passages in
+# search are withheld, so clients only see the (filtered) notes
+TRANSCRIPTS = os.environ.get("STT_MCP_TRANSCRIPTS", "on").strip().lower() not in ("off", "0", "no", "false")
 
 INSTRUCTIONS = """\
 Meeting notes and transcripts recorded with stt-lab: summaries, decisions, action items, open questions,
@@ -46,10 +53,18 @@ Day = Annotated[str, Field(description="ISO date YYYY-MM-DD; overrides that end 
 
 
 def _call(fn, *args, **kw):
+    """Run a store query and pass the answer through the guardrails: every sentence with a deal figure or
+    term, a remark about race or origin, or abuse is replaced by "[removed]" before it leaves the Mac."""
     try:
-        return fn(*args, **kw)
+        result = fn(*args, **kw)
     except store.StoreError as e:
         return {"error": str(e)}
+    if not TRANSCRIPTS and isinstance(result, dict) and isinstance(result.get("results"), list):
+        result["results"] = [r for r in result["results"] if r.get("kind") != "transcript"]
+    result, removed = guardrails.scrub(result)
+    if removed and isinstance(result, dict):
+        result["removed_by_guardrails"] = removed  # tells the client text is missing (never what it was)
+    return result
 
 
 @mcp.tool(annotations=READ)
@@ -91,6 +106,8 @@ def get_transcript(meeting: Annotated[str, Field(description="Recording name fro
                    max_chars: Annotated[int, Field(description="Page size; long meetings come in pages")] = 60000) -> dict:
     """The full transcript as "[mm:ss] SPEAKER_xx: text" lines, for exact wording, details and
     requirements. A long meeting comes in pages: call again with from_minute = continue_from_minute."""
+    if not TRANSCRIPTS:
+        return {"error": "transcripts are not shared over MCP on this Mac; use get_meeting for the notes"}
     return _call(store.get_transcript, meeting, workspace, from_minute, to_minute, max_chars)
 
 

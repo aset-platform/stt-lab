@@ -232,9 +232,9 @@ def get_meeting(meeting, workspace=None):
     with connect() as conn:
         ws_id, ws_name, schema = _workspace(conn, workspace)
         row = _find_meeting(conn, schema, meeting)
-        notes = conn.execute(_q("select kind, text, owner, due from {s}.passages where meeting = %s and kind <> 'transcript' "
+        notes = conn.execute(_q("select kind, text, owner, due from {s}.shared_passages where meeting = %s and kind <> 'transcript' "
                                 "order by seq", schema), (row[0],)).fetchall()
-        n_lines, speakers = conn.execute(_q("select count(*), array_agg(distinct speaker) from {s}.lines where meeting = %s",
+        n_lines, speakers = conn.execute(_q("select count(*), array_agg(distinct speaker) from {s}.shared_lines where meeting = %s",
                                             schema), (row[0],)).fetchone()
     out = {"workspace": ws_name, **_meeting_row(row), "summary": [], "decisions": [], "action_items": [],
            "open_questions": [], "transcript": {"lines": n_lines, "speakers": sorted(speakers or []),
@@ -265,7 +265,7 @@ def get_transcript(meeting, workspace=None, from_minute=None, to_minute=None, ma
             where.append("start_s >= %s"); args.append(float(from_minute) * 60)
         if to_minute is not None:
             where.append("start_s < %s"); args.append(float(to_minute) * 60)
-        lines = conn.execute(_q(f"select start_s, speaker, text from {{s}}.lines where {' and '.join(where)} order by seq",
+        lines = conn.execute(_q(f"select start_s, speaker, text from {{s}}.shared_lines where {' and '.join(where)} order by seq",
                                 schema), args).fetchall()
     text, more = [], None
     size = 0
@@ -313,7 +313,7 @@ def search(query, workspace=None, kind=None, client=None, project=None, person=N
         with hits as materialized (
           select m.name, m.title, m.held, p.kind, p.text, p.owner, p.due, p.start_s, p.end_s,
                  p.embedding <=> %s as distance
-          from {{s}}.passages p join {{s}}.meetings m on m.name = p.meeting
+          from {{s}}.shared_passages p join {{s}}.meetings m on m.name = p.meeting
           {"where " + " and ".join(where) if where else ""}
           order by p.embedding <=> %s limit %s)
         select * from hits order by distance""", schema)
@@ -346,7 +346,7 @@ def action_items(workspace=None, when=None, since=None, until=None, owner=None, 
             resolved["owner"] = who
             where.append("(p.owner ilike %s or p.owner ilike %s)"); args += [f"%{who}%", f"%{owner}%"]
         rows = conn.execute(_q(f"""select m.name, m.title, m.held, p.owner, p.text, p.due
-                                    from {{s}}.passages p join {{s}}.meetings m on m.name = p.meeting
+                                    from {{s}}.shared_passages p join {{s}}.meetings m on m.name = p.meeting
                                     where {' and '.join(where)} order by m.started_at desc, p.seq""", schema),
                             args).fetchall()
     return {"workspace": ws_name, "range": {"from": s and s.isoformat(), "to": u and u.isoformat()},

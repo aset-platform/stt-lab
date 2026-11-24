@@ -105,6 +105,7 @@ def audited(fn):
                 "shared": _kind(fn.__name__, ok) if ok else None,
                 "meetings": shared(ok),
                 "chars": len(json.dumps(result, ensure_ascii=False, default=str)) if result is not None else 0,
+                "removed": (result or {}).get("removed_by_guardrails", 0) if isinstance(result, dict) else 0,
                 "ms": round((time.perf_counter() - t0) * 1000),
                 **({"error": str(error)[:300]} if error else {}),
             })

@@ -31,6 +31,8 @@ from datetime import date, datetime
 import library
 import labels
 import settings
+import share_filter
+import summarise
 from mcp_server.shared import KINDS, READONLY_ROLE, EmbedError, label_key, schema_name
 from mcp_server import shared
 
@@ -185,6 +187,20 @@ def _ensure(conn, ws):
           kind text not null, name text not null, aliases text[] not null default '{{}}',
           status text, note text, org text, role text, client text, first_seen date, last_seen date,
           primary key (kind, name))""", schema))
+    # screening (share_filter.py): restricted = why an item may not leave this Mac (null = shareable);
+    # shared_text = what MCP clients may read of a passage (restricted lines "[removed]"; null = none of it)
+    conn.execute(_sql("alter table {s}.passages add column if not exists restricted text", schema))
+    conn.execute(_sql("alter table {s}.passages add column if not exists shared_text text", schema))
+    conn.execute(_sql("alter table {s}.lines add column if not exists restricted text", schema))
+    conn.execute(_sql("""
+        create or replace view {s}.shared_passages as
+          select id, meeting, kind, seq, shared_text as text, owner, due, start_s, end_s, speakers, embedding
+          from {s}.passages where shared_text is not null""", schema))
+    conn.execute(_sql("""
+        create or replace view {s}.shared_lines as
+          select meeting, seq, start_s, end_s, speaker,
+                 case when restricted is null then text else '[removed]' end as text
+          from {s}.lines""", schema))
     conn.execute(_sql("create index if not exists passages_embedding on {s}.passages "
                       "using hnsw (embedding vector_cosine_ops)", schema))
     conn.execute(_sql("create index if not exists passages_meeting on {s}.passages (meeting)", schema))
@@ -194,7 +210,12 @@ def _ensure(conn, ws):
     from psycopg import sql
     ro = sql.Identifier(READONLY_ROLE)
     conn.execute(sql.SQL("grant usage on schema {s} to {r}").format(s=sql.Identifier(schema), r=ro))
-    conn.execute(sql.SQL("grant select on all tables in schema {s} to {r}").format(s=sql.Identifier(schema), r=ro))
+    # the MCP login reads the screened views, never the full tables: a restricted line can't reach a client
+    # even through a bug in the MCP server
+    sch = sql.Identifier(schema)
+    conn.execute(sql.SQL("revoke select on all tables in schema {s} from {r}").format(s=sch, r=ro))
+    conn.execute(sql.SQL("grant select on {s}.meetings, {s}.entities, {s}.shared_passages, {s}.shared_lines to {r}")
+                 .format(s=sch, r=ro))
     return schema
 
 
@@ -234,7 +255,8 @@ def _held(name):
 
 def _chunking(cfg):
     """Fingerprint of the chunking settings: a meeting indexed with other settings is re-indexed."""
-    return f"t{cfg['chunk_seconds']}o{cfg['chunk_overlap_seconds']}c{cfg['chunk_max_chars']}"
+    screened = f"+{share_filter.VERSION}" if share_filter.enabled() else ""
+    return f"t{cfg['chunk_seconds']}o{cfg['chunk_overlap_seconds']}c{cfg['chunk_max_chars']}{screened}"
 
 
 def _split_long(ln, max_chars):
@@ -256,7 +278,7 @@ def _split_long(ln, max_chars):
     return [{**ln, "text": p} for p in parts]
 
 
-def _transcript_passages(name, seconds, overlap, max_chars=2000, min_chars=200):
+def _transcript_passages(name, seconds, overlap, max_chars=2000, min_chars=200, restricted=None):
     """Windows of whole lines, each about `seconds` long and at most `max_chars`, the next one starting
     `overlap` seconds before this one ends (never mid-line, always moving forward). A line too long for a
     passage is split at sentence ends; a last window under `min_chars` joins the one before it."""
@@ -276,12 +298,20 @@ def _transcript_passages(name, seconds, overlap, max_chars=2000, min_chars=200):
         i = next((k for k in range(i + 1, j) if lines[k]["start"] >= cut), j)
     if len(spans) > 1 and size(*spans[-1]) < min_chars and size(spans[-2][0], spans[-1][1]) <= max_chars:
         spans[-2:] = [(spans[-2][0], spans[-1][1])]
-    return [{"kind": "transcript", "text": "\n".join(f"{l['speaker']}: {l['text'].strip()}" for l in g),
-             "start_s": g[0]["start"], "end_s": g[-1].get("end", g[-1]["start"]),
-             "speakers": sorted({l["speaker"] for l in g})} for g in (lines[a:b] for a, b in spans)]
+    restricted = restricted or {}  # {line start time: reason}
+
+    def passage(g):
+        why = sorted({restricted[l["start"]] for l in g if l["start"] in restricted})
+        shared = [f"{l['speaker']}: " + ("[removed]" if l["start"] in restricted else l["text"].strip()) for l in g]
+        return {"kind": "transcript", "text": "\n".join(f"{l['speaker']}: {l['text'].strip()}" for l in g),
+                "shared_text": None if all(l["start"] in restricted for l in g) else "\n".join(shared),
+                "restricted": ", ".join(why) or None,
+                "start_s": g[0]["start"], "end_s": g[-1].get("end", g[-1]["start"]),
+                "speakers": sorted({l["speaker"] for l in g})}
+    return [passage(lines[a:b]) for a, b in spans]
 
 
-def document(name, cfg=None):
+def document(name, cfg=None, log=print):
     """The workspace, meeting row and passages for `name`, or raise if it is not ready to be indexed."""
     cfg = cfg or config()
     library.audio_path(name)
@@ -309,14 +339,25 @@ def document(name, cfg=None):
         "chunking": _chunking(cfg),
     }
     passages = [{"kind": "summary", "text": s} for s in notes.get("summary", [])]
+    # people and their roles are searchable as summary points ("who owns the agent work?")
+    passages += [{"kind": "summary", "text": "Person: " + summarise._person(p).replace("**", "")}
+                 for p in notes.get("people", []) or []]
     passages += [{"kind": "decision", "text": s} for s in notes.get("decisions", [])]
     passages += [{"kind": "action", "text": a.get("task", ""), "owner": a.get("owner"), "due": a.get("due")}
                  for a in notes.get("action_items", []) if isinstance(a, dict)]
     passages += [{"kind": "question", "text": s} for s in notes.get("open_questions", [])]
     passages = [p for p in passages if isinstance(p["text"], str) and p["text"].strip()]
-    passages += _transcript_passages(name, cfg["chunk_seconds"], cfg["chunk_overlap_seconds"], cfg["chunk_max_chars"])
     lines = [{"start_s": l.get("start"), "end_s": l.get("end"), "speaker": l.get("speaker"), "text": l["text"].strip()}
              for l in (t or {}).get("lines", []) if l.get("text", "").strip()]
+    # screen by meaning before anything is stored (raises, so the meeting isn't indexed, if the model fails)
+    for p, why in zip(passages, share_filter.screen(name, [p["text"] for p in passages], log)):
+        p["restricted"], p["shared_text"] = why, (None if why else p["text"])
+    line_why = share_filter.screen(name, [f"{l['speaker']}: {l['text']}" for l in lines], log)
+    for l, why in zip(lines, line_why):
+        l["restricted"] = why
+    restricted = {l["start_s"]: why for l, why in zip(lines, line_why) if why}
+    passages += _transcript_passages(name, cfg["chunk_seconds"], cfg["chunk_overlap_seconds"], cfg["chunk_max_chars"],
+                                     restricted=restricted)
     return ws, meeting, passages, lines
 
 
@@ -328,10 +369,10 @@ def _embed_text(meeting, p):
            f"\n{p['kind']}{who}: {p['text']}"
 
 
-def index_one(name):
+def index_one(name, log=print):
     """(Re)index one meeting in its workspace's index (and out of any other). Returns the passage count."""
     cfg = config()
-    ws, meeting, passages, lines = document(name, cfg)
+    ws, meeting, passages, lines = document(name, cfg, log)
     vectors = embed([_embed_text(meeting, p) for p in passages], cfg)
     cols = list(meeting)
     with connect(cfg) as conn, conn.transaction():
@@ -343,13 +384,16 @@ def index_one(name):
         with conn.cursor() as cur:
             cur.executemany(
                 _sql("insert into {s}.passages (meeting, kind, seq, text, owner, due, start_s, end_s, speakers,"
-                     " embedding) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", schema),
-                [(name, p["kind"], i, p["text"], p.get("owner"), p.get("due"), p.get("start_s"), p.get("end_s"),
-                  p.get("speakers"), _vec(v)) for i, (p, v) in enumerate(zip(passages, vectors))])
-            cur.executemany(
-                _sql("insert into {s}.lines (meeting, seq, start_s, end_s, speaker, text) values (%s, %s, %s, %s, %s, %s)",
+                     " embedding, restricted, shared_text) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                      schema),
-                [(name, i, l["start_s"], l["end_s"], l["speaker"], l["text"]) for i, l in enumerate(lines)])
+                [(name, p["kind"], i, p["text"], p.get("owner"), p.get("due"), p.get("start_s"), p.get("end_s"),
+                  p.get("speakers"), _vec(v), p.get("restricted"), p.get("shared_text"))
+                 for i, (p, v) in enumerate(zip(passages, vectors))])
+            cur.executemany(
+                _sql("insert into {s}.lines (meeting, seq, start_s, end_s, speaker, text, restricted)"
+                     " values (%s, %s, %s, %s, %s, %s, %s)", schema),
+                [(name, i, l["start_s"], l["end_s"], l["speaker"], l["text"], l.get("restricted"))
+                 for i, l in enumerate(lines)])
     return len(passages)
 
 
@@ -426,7 +470,7 @@ def sync(log=print):
     done, failed = 0, []
     for name in todo:
         try:
-            n = index_one(name)
+            n = index_one(name, log)
             done += 1
             log(f"✓ {name}: {n} passages")
         except Exception as e:
