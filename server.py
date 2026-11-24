@@ -30,6 +30,8 @@ import labels
 import library
 import settings
 import summarise
+import corrections
+import evaluate
 import transcribe
 from library import AUDIO_EXT, RECORDINGS, TRANSCRIPTS, LibraryError
 from transcribe import SR, diarize, fmt, merge
@@ -48,6 +50,32 @@ mx.set_cache_limit(512 * 2**20)
 worker = ThreadPoolExecutor(max_workers=1)
 app = FastAPI()
 busy = set()  # recordings being transcribed right now: not renamable or deletable
+# LLM summaries are Ollama calls, not MLX: they run on their own thread, one at a time, so a recording
+# that starts mid-summary isn't stuck behind it on the MLX thread
+summariser = ThreadPoolExecutor(max_workers=1)
+
+
+class Activity:
+    """Counts live recordings and transcriptions: while any runs, summaries don't start and pause."""
+
+    def __init__(self):
+        self.n, self.lock = 0, threading.Lock()
+
+    def start(self):
+        """Count one in; returns its end(), safe to call more than once."""
+        with self.lock:
+            self.n += 1
+        ended = []
+
+        def end():
+            with self.lock:
+                if not ended:
+                    ended.append(1)
+                    self.n -= 1
+        return end
+
+
+activity = Activity()
 
 # ---------- meeting index (Postgres + pgvector) ----------
 # Kept in step with the library by a sync after every change (confirm, move, rename, delete, summary):
@@ -158,6 +186,26 @@ def variant(model, task):
     return f"{model}.en" if task == "translate" else model
 
 
+_vocab_cache = {}
+
+
+def _vocabulary():
+    """Whisper's initial prompt: the active workspace's people, clients, projects and corrected words.
+    It nudges the decoder toward those spellings; respell (finalize) then fixes what it still mishears.
+    Cached on the registry file's mtime, since live sessions call this for every chunk."""
+    if not settings.get("transcription").get("prime_with_names", True):
+        return None
+    ws = labels.active()
+    try:
+        mtime = (labels.REGISTRY / f"{ws}.json").stat().st_mtime
+    except (OSError, TypeError):
+        return None
+    if _vocab_cache.get("key") != (ws, mtime):
+        names = labels.vocabulary(ws)
+        _vocab_cache.update(key=(ws, mtime), prompt=f"Names: {names}." if names else None)
+    return _vocab_cache["prompt"]
+
+
 def transcribe_chunk(chunk, offset, idx, model, lang, task):
     """Transcribe one pause-delimited chunk. Returns (language, words for merging, segment events)."""
     r = mlx_whisper.transcribe(
@@ -167,6 +215,7 @@ def transcribe_chunk(chunk, offset, idx, model, lang, task):
         task=task,  # "translate" outputs English whatever the spoken language
         word_timestamps=True,
         condition_on_previous_text=False,
+        initial_prompt=_vocabulary(),  # the workspace's names, so Whisper leans toward their spelling
     )
     words, segments = [], []
     for seg in r["segments"]:
@@ -195,6 +244,10 @@ def finalize(path, samples, words, langs, model, lang, task, speakers, timings, 
     duration = len(samples) / SR
     lines = [{"speaker": l["speaker"], "start": l["start"], "end": l["end"], "text": l["text"].strip()}
              for l in merge(words, turns)]
+    try:  # spellings you corrected before ("marlo" -> "Marlow"), in the recording's workspace
+        lines, _ = labels.respell(lines, labels.of(path.name) or labels.active())
+    except Exception:
+        pass
     stats = {"duration": duration, **timings, "diarize_s": time.perf_counter() - t0,
              "speakers": len({t[2] for t in turns}), "languages": sorted(langs), "model": model,
              "task": task, "lang": lang or "auto", "created": datetime.now().isoformat(timespec="seconds")}
@@ -211,35 +264,42 @@ def finalize(path, samples, words, langs, model, lang, task, speakers, timings, 
 def summarise_after(name, emit):
     """Workflow after a recording is transcribed and speaker-labelled: queue it in "To summarise", run the
     LLM, and (summarise_one does this on success) move it to "Summarised". Runs on the job thread.
-    Always ends with exactly one summary_done or summary_error event."""
+    Always ends with exactly one summary_queued, summary_done or summary_error event. With llm.auto_pickup
+    on it only queues: the picker summarises it as soon as nothing is recording."""
     try:
         library.move([name], "to_summarise")
     except Exception as e:
         return emit({"type": "summary_error", "message": f"Could not queue for summary: {e}"})
+    if settings.get("llm").get("auto_pickup", True):
+        return emit({"type": "summary_queued", "name": name,
+                     "message": "Transcript done. Queued in 'To summarise': it is summarised automatically "
+                                "as soon as nothing is recording."})
     status = summarise.check()
     if not status["ok"]:
         return emit({"type": "summary_error",
                      "message": f"Queued in 'To summarise', but the LLM isn't available ({status['message']})"})
     emit({"type": "status", "message": f"Transcript done. Summarising with {status['model']} (1–3 min)…"})
-    busy.add(name)
     try:
         release_models()  # make room for the LLM; speech models reload on the next transcription
-        notes = awake.run(summarise.summarise_one, name)
+        # no pausing here: this waits on the MLX thread, which a new recording would need
+        notes = summariser.submit(summarise_queued, name, False, False).result()
+        if notes is None:
+            raise LibraryError("it was summarised by another run")
         reindex_soon()
         emit({"type": "summary_done", "name": name, "title": notes.get("title"),
               "action_items": len(notes.get("action_items") or []), "seconds": notes["_meta"]["seconds"]})
     except Exception as e:
         emit({"type": "summary_error", "message": f"Summary failed, it stays in 'To summarise': {e}"})
-    finally:
-        busy.discard(name)
 
 
 def run_job(path, model, lang, speakers, task, emit, extra_stats=None):
     busy.add(path.name)
+    end = activity.start()
     try:
         with awake:
             return _run_job(path, model, lang, speakers, task, emit, extra_stats)
     finally:
+        end()
         busy.discard(path.name)
 
 
@@ -277,6 +337,14 @@ LIVE_VAD = VadOptions(min_silence_duration_ms=300, max_speech_duration_s=LIVE_MA
 @app.websocket("/ws/live")
 async def live(ws: WebSocket, model: str = "medium", lang: str = "", task: str = "translate",
                speakers: int = 0, source: str = "mic", prefix: str = "", auto: int = 0):
+    end = activity.start()  # summaries wait (and pause between parts) while this records
+    try:
+        await _live(ws, model, lang, task, speakers, source, prefix, auto, end)
+    finally:
+        end()
+
+
+async def _live(ws, model, lang, task, speakers, source, prefix, auto, end):
     """Live session: browser streams 16 kHz mono int16 PCM; we transcribe each chunk once its speaker
     pauses, send the text back, and on "stop" save the audio and add speaker labels to the whole thing."""
     await ws.accept()
@@ -397,6 +465,7 @@ async def live(ws: WebSocket, model: str = "medium", lang: str = "", task: str =
         await send({"type": "error", "message": f"Final transcript failed ({type(e).__name__}: {e}); "
                                                 f"the audio is saved as {name}"})
         return await close()
+    end()  # recording and final transcript done: a waiting summary may go on
     if auto:  # keeps going (and saves the summary) even if the browser has gone away
         await pump(loop.run_in_executor(worker, summarise_after, name, emit))
     await close()
@@ -417,6 +486,79 @@ async def keep_index_in_step(request, call_next):
 @app.on_event("startup")
 def index_on_start():
     reindex_soon()
+    threading.Thread(target=_picker, daemon=True, name="summary-picker").start()
+
+
+# ---------- summaries picked up from the queue ----------
+_auto = {"running": None, "paused": False, "failed": {}}  # failed: name -> inbox mtime when it failed
+
+
+def _inbox_mtime(name):
+    p = library.LLM_INBOX / f"{name}.md"
+    return p.stat().st_mtime if p.is_file() else None
+
+
+def _wait_for_quiet():
+    """Between a summary's LLM calls: while a recording or transcription runs, free the LLM's memory
+    for Whisper and wait; the summary goes on from the next part when it is quiet again."""
+    if not activity.n:
+        return
+    _auto["paused"] = True
+    print("[summary] paused: a recording or transcription is running")
+    try:
+        summarise.unload(summarise.config()["model"])
+    except Exception:
+        pass
+    while activity.n:
+        time.sleep(5)
+    _auto["paused"] = False
+    print("[summary] resuming")
+    worker.submit(release_models).result()
+
+
+def _picker():
+    """Summarise "To summarise" on its own (llm.auto_pickup), oldest first, one at a time, starting only
+    while nothing records or transcribes. A meeting whose summary failed is not retried until its
+    transcript changes or it is summarised by hand."""
+    while True:
+        time.sleep(15)
+        try:
+            if not settings.get("llm").get("auto_pickup", True) or activity.n or _auto["running"]:
+                continue
+            todo = sorted((n for n in summarise.queued()
+                           if n not in busy and _auto["failed"].get(n) != _inbox_mtime(n)),
+                          key=lambda n: _inbox_mtime(n) or 0)
+            if not todo or not summarise.check()["ok"]:
+                continue
+            name = todo[0]
+            print(f"[summary] picked up {name}")
+            try:
+                notes = summariser.submit(summarise_queued, name).result()
+                if notes is not None:
+                    reindex_soon()
+                    print(f"[summary] ✓ {name}: {notes['_meta']['seconds']} s")
+            except Exception as e:
+                _auto["failed"][name] = _inbox_mtime(name)
+                print(f"[summary] ✗ {name}: {type(e).__name__}: {e}")
+        except Exception as e:
+            print(f"[summary] picker: {type(e).__name__}: {e}")
+
+
+MCP_AUDIT = ROOT / "logs" / "mcp" / "mcp-audit.jsonl"  # written by the MCP server's container
+
+
+@app.get("/api/mcp/audit")
+def mcp_audit(limit: int = 200):
+    """The MCP server's latest tool calls, newest first: client, tool, arguments, meetings shared."""
+    if not MCP_AUDIT.is_file():
+        return {"calls": [], "total": 0}
+    rows = []
+    for line in MCP_AUDIT.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            pass
+    return {"calls": rows[::-1][:max(1, min(limit, 2000))], "total": len(rows)}
 
 
 @app.get("/api/index/status")
@@ -477,6 +619,26 @@ def library_move(names: list[str] = Body(), folder: str = Body()):
     return {"ok": True}
 
 
+@app.post("/api/library/correct")
+def library_correct(name: str = Body(), wrong: str = Body(), right: str = Body(), kind: str = Body(""),
+                    everywhere: bool = Body(False)):
+    """Fix a misheard word in a meeting (or all of its workspace's) and teach the registry the spelling."""
+    names = [it["name"] for it in library.items(labels.of(name))] if everywhere else [name]
+    _not_busy(names)
+    result = corrections.correct(name, wrong, right, kind, everywhere)
+    if result["changed"] and index.config()["enabled"]:
+        # a changed transcript doesn't alter what the index compares (labels, summary time): re-embed explicitly
+        def refresh(changed=tuple(result["changed"])):
+            for n in changed:
+                try:
+                    index.remove(n)
+                except Exception:
+                    pass
+            _sync()
+        indexer.submit(refresh)
+    return result
+
+
 @app.post("/api/library/workspace")
 def library_workspace(names: list[str] = Body(), workspace: str = Body()):
     """Move recordings to another workspace ("" = none). Their labels stay until you re-label them."""
@@ -511,7 +673,15 @@ def library_search(q: str = ""):
 
 @app.get("/api/library/summary/{name}")
 def library_summary(name: str):
-    return library.summary(name)
+    out = library.summary(name)
+    try:  # names said at least twice in the meeting that the summary never mentions (evaluate.py, no LLM)
+        t = library.best_transcript(name)
+        if out.get("data") and t:
+            out["missing_names"] = evaluate.name_gaps(name, [l for l in t["lines"] if l.get("text", "").strip()],
+                                                      out["data"])
+    except Exception:
+        pass
+    return out
 
 
 # ---------- LLM summaries ----------
@@ -519,7 +689,9 @@ def library_summary(name: str):
 def llm_status():
     # a recording being auto-summarised is still in the inbox; don't offer it for a second run
     return {**summarise.check(), "models": summarise.models(),
-            "queued": [n for n in summarise.queued() if n not in busy and library.workspace_of(n) == labels.active()]}
+            "queued": [n for n in summarise.queued() if n not in busy and library.workspace_of(n) == labels.active()],
+            "auto": {"on": bool(settings.get("llm").get("auto_pickup", True)), "running": _auto["running"],
+                     "paused": _auto["paused"], "failed": sorted(_auto["failed"])}}
 
 
 # ---------- Settings tab ----------
@@ -646,11 +818,10 @@ async def llm_summarise(names: list[str] = Body(embed=True)):
     if not status["ok"]:
         raise HTTPException(503, status["message"])
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(worker, release_models)
     results = []
     for name in names:
         try:
-            notes = await loop.run_in_executor(worker, summarise_queued, name)
+            notes = await loop.run_in_executor(summariser, summarise_queued, name)
             if notes is None:  # an auto-summary got to it first
                 results.append({"name": name, "ok": True, "skipped": "already summarised"})
             else:
@@ -660,16 +831,26 @@ async def llm_summarise(names: list[str] = Body(embed=True)):
     return {"results": results}
 
 
-def summarise_queued(name):
-    """Job-thread body of a manual summary. Returns None when the recording was summarised while this
-    request waited its turn (it's no longer queued, but its summary exists)."""
+def summarise_queued(name, release=True, pause=True):
+    """One summary, on the summariser thread (manual, picked up, or after a recording). Returns None when
+    the recording was summarised while this waited its turn (it's no longer queued, but its summary
+    exists). release: free Whisper first (via the MLX thread; False when the caller is on it).
+    pause: wait while something records, before starting and between parts."""
     library.audio_path(name)  # validates the name before it's used in a path
     if name not in summarise.queued() and (library.LLM_SUMMARIES / f"{name}.json").is_file():
         return None
     busy.add(name)
+    _auto["running"] = name
     try:
-        return awake.run(summarise.summarise_one, name)
+        if pause:
+            _wait_for_quiet()
+        if release and not activity.n:
+            worker.submit(release_models).result()
+        _auto["failed"].pop(name, None)
+        return awake.run(summarise.summarise_one, name, None, _wait_for_quiet if pause else None,
+                         lambda m: print(f"[summary] {m}"))
     finally:
+        _auto["running"] = None
         busy.discard(name)
 
 

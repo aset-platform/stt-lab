@@ -18,7 +18,7 @@ MCP_PORT="${STT_MCP_PORT:-8765}"
 # the MCP server reads "yesterday" in this Mac's time zone
 STT_TZ="${STT_TZ:-$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')}"
 export STT_TZ
-mkdir -p logs
+mkdir -p logs/mcp  # logs/mcp: the MCP server's audit log (mounted into its container)
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }

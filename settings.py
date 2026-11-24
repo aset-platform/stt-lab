@@ -24,13 +24,19 @@ DEFAULTS = {
     "transcription": {             # starting values of the Transcribe tab's controls
         "language": "",            # "" = detect per chunk, or "en", "hi"
         "task": "translate",       # "translate" = English output, "transcribe" = as spoken
-        "speakers": 0,             # 0 = detect automatically
+        "speakers": 2,             # most calls are two people; 0 = detect automatically
+        "prime_with_names": True,  # give Whisper the workspace's names so it spells them right
     },
     "llm": {
         "base_url": "http://127.0.0.1:11434/v1",  # Ollama's OpenAI-compatible endpoint
         "model": "gpt-oss:20b",
         "api_key": "local",        # local servers ignore it, but the header must be present for some
         "timeout_s": 900,
+        "reasoning_effort": "none", # thinking models: none/low/medium/high ("" = model default); others ignore it
+        "keep_alive": "30m",       # Ollama: keep the model loaded between the calls of one summary
+        "auto_pickup": True,       # summarise whatever is in "To summarise" on its own, one at a time, only
+                                   # while nothing is recording or transcribing (it pauses between parts)
+        "chunk_minutes": 10,       # summarise long meetings in parts of ~10 min (0 = one call for the whole)
         "max_input_tokens": 100_000,  # ~2 h of meeting is ~30k tokens
         "unload_after_summary": True,  # free the model's memory as soon as a summary is written
         "labels_timeout_s": 2700,  # labels-only pass (a reasoning model can think for 15+ min)
@@ -47,6 +53,9 @@ DEFAULTS = {
         "embed_model": "qwen3-embedding:0.6b",
         "chunk_seconds": 60,       # transcript passages of about a minute
         "chunk_max_chars": 2000,   # a dense minute is cut earlier; an over-long line is split at sentences
+        "share_filter": True,      # screen every line and note by meaning before indexing (share_filter.py);
+                                   # restricted items never reach MCP clients
+        "share_model": "",         # model for screening ("" = the summariser's)
         "chunk_overlap_seconds": 15,  # each passage repeats the end of the one before, so an exchange
                                       # across a boundary is whole in at least one of them
     },

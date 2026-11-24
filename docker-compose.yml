@@ -35,6 +35,10 @@ services:
       STT_EMBED_URL: http://host.docker.internal:11434   # Ollama on the Mac, to embed questions
       STT_TZ: ${STT_TZ:-UTC}                               # ./stt-lab up passes the Mac's time zone
       STT_MCP_TOKEN: ${STT_MCP_TOKEN:-}                    # optional bearer token
+      STT_MCP_AUDIT: /audit/mcp-audit.jsonl                # every tool call: client, tool, meetings shared
+      STT_MCP_TRANSCRIPTS: "${STT_MCP_TRANSCRIPTS:-on}"      # off = notes only, no transcript text
+    volumes:
+      - ./logs/mcp:/audit                                  # on the Mac: logs/mcp/mcp-audit.jsonl
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

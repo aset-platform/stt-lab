@@ -217,10 +217,69 @@ def prompt_block(ws):
         return "\n".join(rows) or "- (none yet)"
 
     text = PROMPT_FILE.read_text()
+    words = [w for w in reg.get("words", []) if w.get("aliases")]
+    if words:  # corrected terms: not labels, but the summary should spell them right
+        text = text.rstrip() + "\n\nOther corrected spellings (write the word on the left wherever the transcript has one " \
+            "on the right):\n" + "\n".join(f"- {w['name']} (heard as: {', '.join(w['aliases'])})" for w in words) + "\n"
     for key, value in {"types": ", ".join(reg["types"]), "clients": known("client"),
                        "projects": known("project"), "people": known("person"), "topics": known("topic")}.items():
         text = text.replace("{{" + key + "}}", value)
     return text
+
+
+# ---------- corrections ----------
+def learn_spelling(ws, wrong, right, kind=""):
+    """Remember that speech recognition writes `right` as `wrong`, so future summaries (respell and the
+    prompt) and transcripts (respell and Whisper's vocabulary) use `right`.
+
+    `right` already known (any kind, by name or alias): `wrong` becomes one of its aliases. Otherwise a new
+    entity of `kind` (client / project / person / topic), or with kind "word" a plain term kept under
+    "words" (product names, jargon) that is not a meeting label. Returns a sentence saying what was learned."""
+    wrong, right = " ".join((wrong or "").split()), " ".join((right or "").split())
+    if not wrong or not right:
+        raise LabelError("give both the wrong and the right spelling")
+    if _norm(wrong) == _norm(right):
+        return f"“{wrong}” and “{right}” differ only in case or punctuation: fixed here, nothing to learn"
+    with _lock:
+        reg = load(ws)
+        pool = [*reg["entities"], *reg.setdefault("words", [])]
+        target = next((e for e in pool if _norm(right) in {_norm(e["name"]), *map(_norm, e.get("aliases", []))}), None)
+        taken = next((e for e in pool if _norm(wrong) in {_norm(e["name"]), *map(_norm, e.get("aliases", []))}), None)
+        if taken and taken is not target:
+            if _norm(taken["name"]) == _norm(wrong):
+                raise LabelError(f"“{wrong}” is itself a known {taken.get('kind', 'word')} in {reg['name']}; "
+                                 "rename it in Settings → Labels instead")
+            taken["aliases"] = [a for a in taken["aliases"] if _norm(a) != _norm(wrong)]  # it was taught wrong before
+        if target is None:
+            if kind == "word":
+                target = {"name": right, "aliases": []}
+                reg["words"].append(target)
+            elif kind in KINDS:
+                target = {"kind": kind, "name": right, "aliases": [], "status": "active"}
+                reg["entities"].append(target)
+            else:
+                raise LabelError(f"“{right}” is new to {reg['name']}: say whether it is a person, client, project, "
+                                 "topic or other word")
+        if _norm(wrong) not in map(_norm, target.get("aliases", [])) and _norm(wrong) != _norm(target["name"]):
+            target["aliases"] = [*target.get("aliases", []), wrong]
+        _save(reg)
+    what = target.get("kind", "word")
+    return f"learned: “{wrong}” is {what} “{target['name']}” in {reg['name']}"
+
+
+def vocabulary(ws, limit_chars=600):
+    """Names and terms to prime Whisper with, active and most recently seen first, within limit_chars."""
+    if not ws or not exists(ws):
+        return ""
+    reg = load(ws)
+    named = [e for e in reg["entities"] if e["kind"] in NAMED and e.get("status") != "archived"]
+    named.sort(key=lambda e: e.get("last_seen") or "", reverse=True)
+    out, size = [], 0
+    for n in [*(e["name"] for e in named), *(w["name"] for w in reg.get("words", []))]:
+        if n not in out and size + len(n) + 2 <= limit_chars:
+            out.append(n)
+            size += len(n) + 2
+    return ", ".join(out)
 
 
 # ---------- spelling in summaries ----------
@@ -231,11 +290,11 @@ def respell(obj, ws):
     if not exists(ws):
         return obj, 0
     names = {}
-    for e in load(ws)["entities"]:
-        if e["kind"] in NAMED:
-            for n in [e["name"], *e.get("aliases", [])]:
-                if n.strip():
-                    names.setdefault(n.strip().lower(), e["name"])
+    reg = load(ws)
+    for e in [*reg["entities"], *reg.get("words", [])]:  # words: corrected terms that aren't names
+        for n in [e["name"], *e.get("aliases", [])]:
+            if n.strip():
+                names.setdefault(n.strip().lower(), e["name"])
     if not names:
         return obj, 0
     pattern = re.compile(r"(?<!\w)(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) + r")(?!\w)",
