@@ -66,7 +66,7 @@ recording in Manage → **Compare models**: each runs alone and you see the summ
 speed and memory.
 
 The 32k-context copy matters: Ollama's default 4096-token context silently cuts any meeting longer than
-~10 minutes (see [Summaries](#summaries-and-action-items-gpt-oss-20b)). Skip this step if you only need
+~10 minutes (see [Summaries](#summaries-and-action-items)). Skip this step if you only need
 transcripts; recordings then wait in *To summarise* until an LLM is available.
 
 ### 4. Run
@@ -118,7 +118,9 @@ no audio is being captured.
 - **Spoken**: `auto`, English or Hindi. Auto detects per chunk; force Hindi if detection flips.
 - **Output**: `English` (Whisper translates as it transcribes) or `As spoken` (Hindi comes out in
   Devanagari).
-- **Speakers**: `0` = detect automatically; enter the count if you know it — it gives exactly that many.
+- **Speakers**: `2` by default (most calls are two people); enter the count if you know it, it gives exactly
+  that many, or `0` to detect automatically. Detection can merge two people into one speaker, which leaves
+  "you" in the summary without an owner.
 
 **Transcript**: click a line to play from there; the line being played is highlighted.
 Saved recordings and their transcripts reload when you select them in **Recordings**.
@@ -137,12 +139,20 @@ Every recording is in one folder: **Inbox** (new recordings land here), **To sum
 - Click a row to see its details and, once summarised, its summary, decisions, action items and open questions.
 - Rename/move/delete are refused while that recording is being transcribed.
 
-## Summaries and action items (gpt-oss-20b)
+## Summaries and action items
 
-**Automatic workflow:** with **Auto-summarise** ticked (next to Live transcript; on by default), every recording
-goes straight through: transcribe → label speakers → *To summarise* → LLM summary → *Summarised*. Non-live
-recordings are transcribed automatically too. If the LLM isn't running or the summary fails, the recording
-stays in *To summarise* and the reason is shown. **Copy transcript** (Transcribe tab) and **Copy summary**
+**The queue summarises itself.** Anything in **To summarise** is picked up automatically
+(`llm.auto_pickup`, Settings → Summariser → *Queue*; on by default), oldest first, one at a time:
+
+- it only starts while nothing is recording or transcribing, so recording always comes first;
+- if a recording starts mid-summary, it stops after the current part (about a minute), unloads the LLM to
+  give Whisper the memory, and goes on from the next part when the recording and its transcript are done;
+- a summary that fails is not retried until its transcript changes or you run it by hand (**Summarise
+  queued**); the reason is in `logs/server.log` (`[summary]` lines);
+- the Manage tab shows which meeting is being summarised and whether it is paused.
+
+With **Auto-summarise** ticked (next to Live transcript) a finished recording is moved to *To summarise* by
+itself; untick it to choose what goes there. With auto pickup off, only **Summarise queued** runs the queue. **Copy transcript** (Transcribe tab) and **Copy summary**
 (Manage tab, Markdown) put the text on the clipboard.
 
 Moving a recording to **To summarise** writes its transcript (English if available) with a metadata header
@@ -171,6 +181,27 @@ printf 'FROM gpt-oss:20b\nPARAMETER num_ctx 32768\n' > Modelfile && ollama creat
 If the input or reply is still cut off, the summariser reports it as an error and the transcript stays queued.
 
 The instructions given to the model are in `prompts/meeting_summary.md`; edit them to change the output.
+They are written for any model, not one in particular.
+
+**Long meetings go in parts.** A meeting longer than `llm.chunk_minutes` (10) is summarised in parts of about
+10 minutes; each part gets the people found so far, the parts are merged in code, and one last call
+(`prompts/meeting_tidy.md`) joins repeats and name variants without adding anything. A 45-minute meeting
+takes ~7 min with `qwen3.5-9b-32k` and thinking off (`llm.reasoning_effort: "none"`), instead of timing out
+as one call. `llm.keep_alive` ("30m") keeps the model loaded between the parts.
+
+**What the prompt and the checks after it enforce:**
+
+| Rule | How |
+|---|---|
+| No guessed roles | role, organisation and reporting line only when the transcript says them, each with the time it was said (`role_at`, …); a field whose cited line doesn't mention it, or a role of only generic words, becomes `undefined`. People with nothing known show as a plain name |
+| One reporting line | "A reports to B" never both ways; loops are cleared (`check_hierarchy`) |
+| Misheard tech terms | "Colibra" → Collibra and similar; names, clients and projects use the registry |
+| Owners | "With Tamsin, you have to…" is the listener's task; an owner named in their own task becomes `unassigned` |
+| Left out | deal and commercial details, any money amount, remarks about someone's background, swearing and insults, sarcasm, gossip. The guardrail patterns then drop any sentence that still has one ([below](#keeping-sensitive-content-away-from-ai-assistants)) |
+
+`_meta` in each summary's JSON records what the checks cleared (`cleared_without_evidence`,
+`sensitive_sentences_dropped`, `owner_unassigned`). `evaluate.py` scores a summary against its transcript
+(names missed, plus an LLM judge).
 
 Once gpt-oss is installed (e.g. `ollama pull gpt-oss:20b`), either click **Summarise queued** in the Manage
 tab, or run:
@@ -182,10 +213,10 @@ uv run summarise.py             # summarise everything in llm/inbox/
 
 Until then the Manage tab shows *LLM not connected* and queued transcripts simply wait.
 
-**Memory:** gpt-oss-20b needs ~12–13 GB, so it can't run alongside the speech models on 16 GB. Before
-summarising from the UI, the server unloads Whisper and pyannote (they reload on the next transcription),
-and summarising runs on the same job queue as transcription so the two never overlap. When using
-`summarise.py` directly, stop the server first.
+**Memory:** a 9B model needs ~8–9 GB and gpt-oss-20b ~12–13 GB, so neither fits alongside the speech models on
+16 GB. Before summarising, the server unloads Whisper and pyannote (they reload on the next transcription).
+Summaries run on their own thread, one at a time, and wait or pause while anything records or transcribes.
+When using `summarise.py` directly, stop the server first.
 
 ## Meeting labels (workspaces and registry)
 
@@ -330,6 +361,38 @@ url = "http://127.0.0.1:8765/mcp"
 # bearer_token_env_var = "STT_MCP_TOKEN"   # if you set a token
 ```
 
+## Keeping sensitive content away from AI assistants
+
+The MCP server feeds meetings to outside services (ChatGPT, Claude, Codex). Deal figures, remarks about people
+and abuse must not reach them, so there are three layers:
+
+1. **The summary prompt** asks the model to leave them out (see [Summaries](#summaries-and-action-items)).
+2. **Guardrail patterns** (`mcp_server/guardrails.py`) catch amounts ("$1.3M", "1.3 million for a year",
+   "2 crore"; technical counts such as "1.3 million rows" are kept), deal terms (pricing, budget, margin,
+   invoice…), remarks about origin, race or religion, and swearing in English and Hindi. They run twice: on
+   every summary after the model wrote it (the sentence is dropped) and on every MCP answer (it becomes
+   `[removed]`; the audit log counts them as `removed`).
+3. **Screening by meaning when indexing** (`share_filter.py`, `prompts/share_filter.md`): the local LLM reads
+   every transcript line (in batches of 40, with the lines around it) and every point of the notes, and flags
+   deal talk said vaguely ("around 1.3 for the year"), remarks about someone's background, insults, sarcasm,
+   gossip and a person's compliance issues. When unsure about deals or background it flags.
+
+A flagged item is **not deleted**: it stays in the index, marked `restricted` with its reason, so search on
+this Mac still finds it. The MCP server's read-only login can only read two views, `shared_passages` and
+`shared_lines`, which leave flagged passages out and show flagged lines as `[removed]`; it has no access to
+the tables themselves. Verdicts are cached by text in `llm/guard/<recording>.json`, so re-indexing doesn't
+ask the model again. If the model can't be reached, the meeting is not indexed: nothing unscreened is
+shared. Expect some over-flagging (a plain "she lives in Ireland" can be held back).
+
+| Setting | Default | What |
+|---|---|---|
+| `index.share_filter` | `true` | Screen by meaning before indexing (the patterns always run) |
+| `index.share_model` | `""` | Model for screening (`""` = the summariser's) |
+| `STT_MCP_TRANSCRIPTS` (env, `./stt-lab up`) | `on` | `off`: MCP clients get notes only; `get_transcript` refuses and search returns no transcript passages |
+
+Patterns can't recognise everything (a rude remark in polite words); for client meetings with sensitive
+talk, `STT_MCP_TRANSCRIPTS=off ./stt-lab up` keeps transcript text away from MCP clients entirely.
+
 ## How it works
 
 ### File mode (upload, YouTube, Transcribe button)
@@ -455,8 +518,11 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `mcp_server/` | MCP server (tools and prompts over the index), its Dockerfile, and `shared.py` (what the indexer and server agree on) |
 | `settings.json` | All settings, one section per feature, edited in the Settings tab; defaults in `settings.py` (git-ignored; replaces the older `llm.json`, which is moved in automatically) |
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
-| `summarise.py` | LLM summariser (OpenAI-compatible API) and its CLI |
-| `prompts/meeting_summary.md` | Instructions given to the LLM |
+| `summarise.py` | LLM summariser (OpenAI-compatible API): parts, merge, evidence/hierarchy/owner checks, and its CLI |
+| `prompts/meeting_summary.md`, `prompts/meeting_tidy.md` | Instructions given to the LLM: the summary, and the tidy pass after a meeting in parts |
+| `mcp_server/guardrails.py` | Guardrail patterns: amounts, deal terms, sensitive remarks, abuse; used on summaries and MCP answers |
+| `share_filter.py`, `prompts/share_filter.md` | Screening by meaning before indexing; restricted items never reach MCP clients |
+| `evaluate.py` | Scores a summary against its transcript: names missed, LLM judge |
 | `library.json` | Which folder each recording is in (git-ignored) |
 | `llm/` | Hand-off folders for the LLM (git-ignored) |
 | `models/pyannote-speaker-diarization-community-1/` | Bundled speaker model (CC-BY-4.0) |
