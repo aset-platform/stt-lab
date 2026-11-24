@@ -171,6 +171,11 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .fixw { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .fixw .lacts input[type=text] { font-size: 13px; padding: 3px 7px; width: 150px; }
 .fixw select { font-size: 12px; padding: 2px 6px; }
+.voice { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin-top: 10px; align-items: start; }
+.voice .who input { font-size: 13px; padding: 3px 7px; width: 100%; box-sizing: border-box; }
+.voice .said { font-size: 12px; color: var(--muted); margin: 0; padding-left: 14px; }
+.voice .said li { margin: 2px 0; }
+@media (max-width: 600px) { .voice { grid-template-columns: 1fr; } }
 table.reg { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.reg th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 5px 6px; border-bottom: 1px solid var(--border); }
 table.reg td { padding: 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -336,6 +341,10 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
       <div class="setting"><div class="what"><b>Auto-summarise</b>
         <p class="hint">When a recording is transcribed and speakers are labelled, summarise it and file it under Summarised.</p></div>
         <input type="checkbox" data-set="recording.auto_summarise"></div>
+      <div class="setting"><div class="what"><b>Your name</b>
+        <p class="hint">Tells the summariser that you made the recording and are one of the voices, so it works out which
+          one is you. Naming the voices of a meeting (Speakers, under its summary) is surer.</p></div>
+        <input type="text" data-set="recording.your_name" placeholder="e.g. Marlow" style="width:160px"></div>
     </div>
     <div class="panel">
       <h2>Transcription defaults</h2>
@@ -1029,7 +1038,7 @@ async function renderDetail() {
     : it.summary ? "<p class='meta'>Loading summary…</p>"
     : "<p class='meta'>No summary yet. Move it to “To summarise” to queue it for the LLM.</p>";
   $("detail").innerHTML = `<h3>${esc(it.name)}</h3><div class="meta">${esc(meta)}</div>${body}`;
-  if (!it.summary) { if (it.queued) addLabelBox(it); return renderCompare(it); }
+  if (!it.summary) { if (it.queued) addLabelBox(it); if (it.transcripts.length) addSpeakerBox(it); return renderCompare(it); }
   try {
     const { data, markdown, missing_names } = await api(`/api/library/summary/${encodeURIComponent(it.name)}`);
     if (focus !== it.name) return;
@@ -1048,9 +1057,49 @@ async function renderDetail() {
         ${gaps.slice(0, 12).map((g) => `<b>${esc(g.name)}</b> (${g.mentions}×, from ${esc(g.first_at)})`).join(", ")}.
         Some are just terms; a missing person or client usually means a gap. Check the transcript or re-summarise.</p>`);
     addFixBox(it);
+    addSpeakerBox(it);
   } catch (e) { $("detail").insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`); }
   addLabelBox(it);
   renderCompare(it);
+}
+
+// ---- name the voices: SPEAKER_00 = Marlow. Summaries, the index and the transcript then use the names ----
+async function addSpeakerBox(it) {
+  $("detail").insertAdjacentHTML("beforeend", `<div class="fixw" id="spkBox"><b>Speakers</b>
+    <div id="spkBody" class="meta">Loading voices…</div></div>`);
+  let info;
+  try { info = await api(`/api/speakers/${encodeURIComponent(it.name)}`); }
+  catch (e) { if ($("spkBody")) $("spkBody").textContent = e.message; return; }
+  if (focus !== it.name || !$("spkBody")) return;
+  const mins = (s) => s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
+  const named = Object.keys(info.names).length;
+  $("spkBody").className = "";
+  $("spkBody").innerHTML = `<p class="hint" style="margin:4px 0 0">Who is each voice? The summary, the transcript and the
+      index then use the name, so what each person said and took on is put to the right person.
+      ${named ? "" : `<b style="color:var(--danger)">Not named yet</b>: the summariser has to guess who is who.`}
+      ${info.your_name ? `You are <b>${esc(info.your_name)}</b> (Settings → Recording).` : "Set your name in Settings → Recording to help it when voices are not named."}</p>
+    <datalist id="spkPeople">${[info.your_name, ...info.people].filter(Boolean).map((p) => `<option value="${esc(p)}">`).join("")}</datalist>
+    ${info.voices.map((v) => `<div class="voice"><div class="who"><b>${esc(v.label.replace("SPEAKER_", "Speaker "))}</b>
+        <div class="meta">${mins(v.seconds)} · ${v.lines} lines</div>
+        <input type="text" list="spkPeople" data-label="${esc(v.label)}" value="${esc(info.names[v.label] || "")}" placeholder="name"></div>
+      <ul class="said">${v.samples.map((x) => `<li>[${esc(x.at)}] ${esc(x.text)}</li>`).join("")}</ul></div>`).join("")}
+    <div class="lacts" style="margin-top:10px"><button id="spkSave">Save names</button>
+      ${it.summary ? '<button class="primary" id="spkRedo">Save and re-summarise</button>' : ""}
+      <span class="meta" id="spkOut"></span></div>`;
+  const save = async (resummarise) => {
+    const names = {};
+    $("spkBox").querySelectorAll("input[data-label]").forEach((i) => (names[i.dataset.label] = i.value.trim()));
+    $("spkBox").querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      const r = await api(`/api/speakers/${encodeURIComponent(it.name)}`, { names, resummarise });
+      $("spkOut").textContent = r.queued ? "Saved. Queued for a new summary; it starts when nothing is recording."
+        : `Saved ${Object.keys(r.names).length} name(s).` + (it.summary ? " Re-summarise to use them in the summary." : "");
+      if (r.queued) setTimeout(loadLibrary, 800);
+    } catch (e) { $("spkOut").textContent = e.message; }
+    $("spkBox").querySelectorAll("button").forEach((b) => (b.disabled = false));
+  };
+  $("spkSave").onclick = () => save(false);
+  if ($("spkRedo")) $("spkRedo").onclick = () => save(true);
 }
 
 // ---- fix a misheard word: corrects this meeting and teaches the workspace registry ----

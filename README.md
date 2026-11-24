@@ -198,12 +198,27 @@ as one call. `llm.keep_alive` ("30m") keeps the model loaded between the parts.
 | One reporting line | "A reports to B" never both ways; loops are cleared (`check_hierarchy`) |
 | Misheard tech terms | "Colibra" → Collibra and similar; names, clients and projects use the registry |
 | Owners | "With Tamsin, you have to…" is the listener's task; an owner named in their own task becomes `unassigned` |
-| Only people who were discussed | a person must be named in the transcript and have something concrete (a stated role, an action item, notes beyond "mentioned"); names the model took from the registry list are dropped (`check_people`) |
+| Only people who were discussed | a person must be named in the transcript and have something concrete (a stated role, an action item, notes beyond "mentioned"); names the model took from the registry list are dropped, and so is someone named once whose notes only say they came up ("Mentioned as…", "Addressed by…") (`check_people`) |
+| No voice labels | `SPEAKER_01` never appears in the notes: an owner that is a label becomes `unassigned`, and in text it becomes "a participant" (`drop_speaker_labels`). Name the voices to get names instead ([below](#who-is-who-naming-the-voices)) |
 | Each point once | near-repeats in summary, decisions, questions, action items and a person's notes are removed, the more detailed one kept (`dedupe_notes`) |
 | Left out | deal and commercial details, any money amount, remarks about someone's background, swearing and insults, sarcasm, gossip. The guardrail patterns then drop any sentence that still has one ([below](#keeping-sensitive-content-away-from-ai-assistants)) |
 
 `_meta` in each summary's JSON records what the checks cleared (`cleared_without_evidence`,
-`sensitive_sentences_dropped`, `owner_unassigned`, `people_dropped`, `repeats_removed`).
+`sensitive_sentences_dropped`, `owner_unassigned`, `people_dropped`, `repeats_removed`,
+`speaker_labels_replaced`).
+
+### Who is who (naming the voices)
+
+Diarisation only tells voices apart (`SPEAKER_00`, `SPEAKER_01`); left to guess, the model easily puts
+one person's tasks on the other ("your name is Marlow" is said *to* Marlow, not by him). Two helps:
+
+- **Speakers box** (under a meeting's summary in Manage): each voice with its talk time and three of its
+  longer lines, and a name field (workspace people are suggested). **Save and re-summarise** queues the
+  meeting again. Names are kept in `llm/speakers/<recording>.json` and used by the summary, the
+  transcript view and the index; a meeting already queued gets the names in its hand-off at once.
+- **Your name** (Settings → Recording): the hand-off header then says `recorded_by: <you>`, so the model
+  knows you are one of the voices and works out which from what is said. The prompt also says a name
+  someone is addressed by belongs to the other speaker, and that whoever says "I will…" owns the task.
 
 **Whisper's silence filler** is removed before anything reads a transcript (`library.drop_repeats`): a phrase
 looped three or more times in a row ("okay okay okay…") is kept once, and a line that repeats one of

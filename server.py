@@ -637,6 +637,29 @@ def library_move(names: list[str] = Body(), folder: str = Body()):
     return {"ok": True}
 
 
+@app.get("/api/speakers/{name}")
+def speakers_get(name: str):
+    """The meeting's voices (talk time, a few long lines) with the names given to them, and the workspace's
+    people to pick from."""
+    name = safe_path(name).name
+    ws = labels.of(name)
+    people = sorted(e["name"] for e in (labels.load(ws)["entities"] if ws else [])
+                    if e.get("kind") == "person" and e.get("status") != "archived")
+    return {"voices": library.speaker_overview(name), "names": library.speaker_names(name), "people": people,
+            "your_name": settings.get("recording").get("your_name") or ""}
+
+
+@app.post("/api/speakers/{name}")
+def speakers_set(name: str, names: dict[str, str] = Body(), resummarise: bool = Body(False)):
+    """Name the voices. With `resummarise`, the meeting goes back to "To summarise" (the queue picks it up)."""
+    name = safe_path(name).name
+    _not_busy([name])
+    saved = library.set_speaker_names(name, names)
+    if resummarise:
+        library.move([name], "to_summarise")
+    return {"names": saved, "queued": resummarise}
+
+
 @app.post("/api/library/correct")
 def library_correct(name: str = Body(), wrong: str = Body(), right: str = Body(), kind: str = Body(""),
                     everywhere: bool = Body(False)):
@@ -913,10 +936,13 @@ def audio(name: str):
 
 @app.get("/api/transcript/{name}")
 def transcript(name: str, model: str = "medium", task: str = "translate"):
-    p = TRANSCRIPTS / f"{safe_path(name).name}.{variant(model, task)}.json"
+    name = safe_path(name).name
+    p = TRANSCRIPTS / f"{name}.{variant(model, task)}.json"
     if not p.is_file():
         raise HTTPException(404, "no transcript yet")
-    return json.loads(p.read_text())
+    t = json.loads(p.read_text())
+    t["lines"] = library.name_speakers(t.get("lines") or [], library.speaker_names(name))  # names you gave the voices
+    return t
 
 
 @app.get("/api/transcribe/{name}")
