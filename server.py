@@ -29,6 +29,7 @@ import index
 import labels
 import library
 import settings
+import share_filter
 import summarise
 import corrections
 import evaluate
@@ -244,6 +245,7 @@ def finalize(path, samples, words, langs, model, lang, task, speakers, timings, 
     duration = len(samples) / SR
     lines = [{"speaker": l["speaker"], "start": l["start"], "end": l["end"], "text": l["text"].strip()}
              for l in merge(words, turns)]
+    lines, _ = library.drop_repeats(lines)  # Whisper's silence filler: loops and repeated lines
     try:  # spellings you corrected before ("marlo" -> "Marlow"), in the recording's workspace
         lines, _ = labels.respell(lines, labels.of(path.name) or labels.active())
     except Exception:
@@ -504,7 +506,7 @@ def _wait_for_quiet():
     if not activity.n:
         return
     _auto["paused"] = True
-    print("[summary] paused: a recording or transcription is running")
+    print("[llm] paused: a recording or transcription is running")
     try:
         summarise.unload(summarise.config()["model"])
     except Exception:
@@ -512,8 +514,11 @@ def _wait_for_quiet():
     while activity.n:
         time.sleep(5)
     _auto["paused"] = False
-    print("[summary] resuming")
+    print("[llm] resuming")
     worker.submit(release_models).result()
+
+
+share_filter.wait = _wait_for_quiet  # index screening uses the LLM too: it waits for recordings
 
 
 def _picker():
