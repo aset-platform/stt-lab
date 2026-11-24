@@ -402,6 +402,25 @@ shared. Expect some over-flagging (a plain "she lives in Ireland" can be held ba
 Patterns can't recognise everything (a rude remark in polite words); for client meetings with sensitive
 talk, `STT_MCP_TRANSCRIPTS=off ./stt-lab up` keeps transcript text away from MCP clients entirely.
 
+### Observability page
+
+The **Observability** tab answers one question: has anything left this Mac that shouldn't have? It shows
+
+- **a verdict and alerts.** Every MCP call logs a fingerprint (16-character sha1) of each point and transcript
+  line it sent, never the text. The page matches them against what is restricted *now*, so an item restricted
+  later (a new screening, a fixed rule) still shows which calls had already shared it ("shared, now
+  restricted"). Calls logged before fingerprints existed are checked by meeting ("not verifiable"), and calls
+  from before the guardrails as "before guardrails";
+- **safety checks.** The MCP database login can read only the screened views and write nothing, and the
+  views really hide every restricted line and point;
+- **AI client logs.** *Scan now* looks for every restricted text (30+ characters) in the session logs Codex
+  (`~/.codex/sessions`) and Claude Code (`~/.claude/projects`) keep on this Mac. A hit means the text was in
+  a conversation with that app, so its model provider has it too. Hits in Claude Code sessions of this repo
+  (building stt-lab) are listed apart;
+- **what is held back**, per meeting and reason, with the texts (on this Mac only), and the recent MCP calls.
+
+`uv run observe.py` prints the same summary in the terminal; the last scan is in `logs/observe-scan.json`.
+
 ## How it works
 
 ### File mode (upload, YouTube, Transcribe button)
@@ -532,6 +551,7 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `mcp_server/guardrails.py` | Guardrail patterns: amounts, deal terms, sensitive remarks, abuse; used on summaries and MCP answers |
 | `share_filter.py`, `prompts/share_filter.md` | Screening by meaning before indexing; restricted items never reach MCP clients |
 | `evaluate.py` | Scores a summary against its transcript: names missed, LLM judge |
+| `observe.py` | The Observability page: restricted items, MCP calls matched by fingerprint, self-checks, client-log scan |
 | `library.json` | Which folder each recording is in (git-ignored) |
 | `llm/` | Hand-off folders for the LLM (git-ignored) |
 | `models/pyannote-speaker-diarization-community-1/` | Bundled speaker model (CC-BY-4.0) |

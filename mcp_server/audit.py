@@ -2,8 +2,12 @@
 
 One JSON line per call in $STT_MCP_AUDIT (docker-compose.yml mounts it to logs/mcp/ on the Mac, so it
 survives container rebuilds). It records what was shared, never the shared text itself: meeting names,
-titles and dates, and the size of the answer.
+titles and dates, the size of the answer, and "fp": a fingerprint (sha1, 16 hex) of every point and
+transcript line that went out. The Observability page (observe.py) matches the fingerprints against what
+is restricted, so a later screening that restricts an item shows which calls had already shared it.
 """
+import hashlib
+import re
 import contextvars
 import functools
 import json
@@ -53,6 +57,38 @@ def shared(result):
                 walk(v)
     walk(result)
     return out
+
+
+_HEAD = re.compile(r"^\[[\d:]+\]\s*")  # "[12:34] " before a transcript line
+_NOT_TEXT = {"meeting", "recording", "workspace", "workspace_id", "date", "start", "at", "first_seen", "last_seen",
+             "status", "kind", "error", "today", "range", "title", "owner", "due", "held", "started_at", "type"}
+
+
+def fp(text):
+    """The fingerprint of one shared text: the same as share_filter's cache key for it."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def fingerprints(result):
+    """Fingerprints of every point and every transcript line ("SPEAKER: text") in an answer."""
+    keys = set()
+
+    def walk(x, key=""):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                walk(v, k)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, key)
+        elif isinstance(x, str) and key not in _NOT_TEXT and x.strip():
+            keys.add(fp(x.strip()))
+            if "\n" in x or _HEAD.match(x):
+                for line in x.split("\n"):
+                    line = _HEAD.sub("", line).strip()
+                    if line and line != "[removed]":
+                        keys.add(fp(line))
+    walk(result)
+    return sorted(keys)
 
 
 def _kind(tool, result):
@@ -106,6 +142,7 @@ def audited(fn):
                 "meetings": shared(ok),
                 "chars": len(json.dumps(result, ensure_ascii=False, default=str)) if result is not None else 0,
                 "removed": (result or {}).get("removed_by_guardrails", 0) if isinstance(result, dict) else 0,
+                "fp": fingerprints(ok) if ok and fn.__name__ not in ("list_workspaces", "registry") else [],
                 "ms": round((time.perf_counter() - t0) * 1000),
                 **({"error": str(error)[:300]} if error else {}),
             })

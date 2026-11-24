@@ -28,6 +28,7 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 import index
 import labels
 import library
+import observe
 import settings
 import share_filter
 import summarise
@@ -564,6 +565,18 @@ def mcp_audit(limit: int = 200):
         except ValueError:
             pass
     return {"calls": rows[::-1][:max(1, min(limit, 2000))], "total": len(rows)}
+
+
+@app.get("/api/observe")
+def observe_report():
+    """The Observability page: what is held back, what MCP clients got, self-checks, alerts."""
+    return observe.report()
+
+
+@app.post("/api/observe/scan")
+def observe_scan():
+    """Look for restricted texts in the AI clients' session logs on this Mac (Codex, Claude Code)."""
+    return observe.scan()
 
 
 @app.get("/api/index/status")
