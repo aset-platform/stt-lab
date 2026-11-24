@@ -1,0 +1,4 @@
+# The MCP image needs only mcp_server/; keep recordings, transcripts and models out of the build context
+*
+!mcp_server/
+mcp_server/__pycache__

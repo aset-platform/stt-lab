@@ -31,11 +31,10 @@ from datetime import date, datetime
 import library
 import labels
 import settings
+from mcp_server.shared import KINDS, READONLY_ROLE, EmbedError, label_key, schema_name
+from mcp_server import shared
 
-SCHEMA_VERSION = "3"
-QUERY_INSTRUCTION = ("Instruct: Given a question about past meetings, retrieve the meeting notes and "
-                     "transcript passages that answer it\nQuery: ")
-KINDS = ("summary", "decision", "action", "question", "transcript")
+SCHEMA_VERSION = "4"
 _init_lock = threading.Lock()
 _ready = set()  # database urls whose schema is known to be in place
 
@@ -47,26 +46,17 @@ class IndexError_(library.LibraryError):
 def config():
     cfg = dict(settings.get("index"))
     cfg["database_url"] = os.environ.get("STT_DB_URL") or cfg["database_url"]
+    cfg["mcp_db_password"] = os.environ.get("STT_MCP_DB_PASSWORD") or cfg["mcp_db_password"]
     return cfg
 
 
 # ---------- embeddings ----------
 def embed(texts, cfg=None, query=False):
-    """Vectors for `texts` from Ollama's /api/embed, in batches."""
     cfg = cfg or config()
-    out = []
-    for i in range(0, len(texts), 32):
-        batch = [(QUERY_INSTRUCTION + t) if query else t for t in texts[i:i + 32]]
-        req = urllib.request.Request(cfg["embed_url"].rstrip("/") + "/api/embed",
-                                     data=json.dumps({"model": cfg["embed_model"], "input": batch,
-                                                      "keep_alive": "5m"}).encode(),
-                                     headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=300) as r:
-                out += json.loads(r.read())["embeddings"]
-        except OSError as e:
-            raise IndexError_(f"embedding model {cfg['embed_model']} not reachable at {cfg['embed_url']}: {e}")
-    return out
+    try:
+        return shared.embed(texts, cfg["embed_url"], cfg["embed_model"], query)
+    except EmbedError as e:
+        raise IndexError_(str(e))
 
 
 # ---------- database ----------
@@ -76,7 +66,7 @@ def embed(texts, cfg=None, query=False):
 def schema_of(ws):
     if not labels.exists(ws):
         raise IndexError_(f"no workspace {ws!r}")
-    return "ws_" + ws.replace("-", "_")  # workspace ids are [a-z0-9-], so this can't collide
+    return schema_name(ws)
 
 
 def _ws_of_schema(schema):
@@ -129,6 +119,16 @@ def _init(conn, cfg):
         for schema in _schemas(conn).values():
             conn.execute(_sql("drop schema {s} cascade", schema))
         conn.execute("delete from index_info")
+        conn.execute("drop table if exists public.workspaces")
+        conn.execute("""create table public.workspaces (id text primary key, name text not null,
+                        schema text not null, active boolean not null default false,
+                        updated_at timestamptz not null default now())""")
+        # the MCP server logs in as this role: it can read the index and nothing else
+        from psycopg import sql
+        exists = conn.execute("select 1 from pg_roles where rolname = %s", (READONLY_ROLE,)).fetchone()
+        conn.execute(sql.SQL("{} role {} login password {}").format(
+            sql.SQL("alter" if exists else "create"), sql.Identifier(READONLY_ROLE), sql.Literal(cfg["mcp_db_password"])))
+        conn.execute(_sql("grant select on public.workspaces, public.index_info to {s}", READONLY_ROLE))
         dim = len(embed(["dimension check"], cfg)[0])
         with conn.cursor() as cur:
             cur.executemany("insert into index_info values (%s, %s)",
@@ -144,6 +144,7 @@ def _ensure(conn, ws):
         create table if not exists {s}.meetings (
           name          text primary key,
           held          date,
+          started_at    timestamp,                  -- local time the recording started
           title         text,
           type          text,
           clients       text[] not null default '{{}}',
@@ -170,11 +171,30 @@ def _ensure(conn, ws):
           end_s     real,
           speakers  text[],
           embedding vector({dim}) not null)""", schema))
+    conn.execute(_sql("""
+        create table if not exists {s}.lines (      -- the transcript as spoken, for reading in full
+          meeting  text not null references {s}.meetings(name) on delete cascade on update cascade,
+          seq      int not null,
+          start_s  real,
+          end_s    real,
+          speaker  text,
+          text     text not null,
+          primary key (meeting, seq))""", schema))
+    conn.execute(_sql("""
+        create table if not exists {s}.entities (   -- the workspace registry, to resolve misheard names
+          kind text not null, name text not null, aliases text[] not null default '{{}}',
+          status text, note text, org text, role text, client text, first_seen date, last_seen date,
+          primary key (kind, name))""", schema))
     conn.execute(_sql("create index if not exists passages_embedding on {s}.passages "
                       "using hnsw (embedding vector_cosine_ops)", schema))
     conn.execute(_sql("create index if not exists passages_meeting on {s}.passages (meeting)", schema))
     conn.execute(_sql("create index if not exists meetings_held on {s}.meetings (held)", schema))
     conn.execute(_sql("create index if not exists meetings_label_keys on {s}.meetings using gin (label_keys)", schema))
+    conn.execute(_sql("create index if not exists meetings_started on {s}.meetings (started_at)", schema))
+    from psycopg import sql
+    ro = sql.Identifier(READONLY_ROLE)
+    conn.execute(sql.SQL("grant usage on schema {s} to {r}").format(s=sql.Identifier(schema), r=ro))
+    conn.execute(sql.SQL("grant select on all tables in schema {s} to {r}").format(s=sql.Identifier(schema), r=ro))
     return schema
 
 
@@ -184,7 +204,7 @@ def reset():
     with connect(cfg) as conn, conn.transaction():
         for schema in _schemas(conn).values():
             conn.execute(_sql("drop schema {s} cascade", schema))
-        conn.execute("drop table if exists index_info")
+        conn.execute("drop table if exists index_info, workspaces")
     _ready.discard(cfg["database_url"])
 
 
@@ -198,6 +218,13 @@ def drop_workspace(ws):
 
 
 # ---------- what goes in ----------
+def _started(name):
+    m = re.search(r"(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})", name)
+    if m:
+        return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}:{m.group(3)}:{m.group(4)}")
+    return datetime.fromtimestamp(library.audio_path(name).stat().st_mtime).replace(microsecond=0)
+
+
 def _held(name):
     m = re.search(r"\d{4}-\d{2}-\d{2}", name)
     if m:
@@ -208,10 +235,6 @@ def _held(name):
 def _chunking(cfg):
     """Fingerprint of the chunking settings: a meeting indexed with other settings is re-indexed."""
     return f"t{cfg['chunk_seconds']}o{cfg['chunk_overlap_seconds']}c{cfg['chunk_max_chars']}"
-
-
-def label_key(kind, name):
-    return f"{kind}:{' '.join(str(name).lower().split())}"
 
 
 def _split_long(ln, max_chars):
@@ -276,7 +299,7 @@ def document(name, cfg=None):
     model = re.search(r"summarised by (.+?)_\n", md.read_text()) if md.is_file() else None
     t = library.best_transcript(name)
     meeting = {
-        "name": name, "held": _held(name),
+        "name": name, "held": _held(name), "started_at": _started(name),
         "title": notes.get("title") or name, "type": lab.get("type"),
         **{f: lab.get(f, []) for f in ("clients", "projects", "people", "topics")},
         "label_keys": [label_key(k, n) for k, f in labels.KINDS.items() for n in lab.get(f, [])],
@@ -292,7 +315,9 @@ def document(name, cfg=None):
     passages += [{"kind": "question", "text": s} for s in notes.get("open_questions", [])]
     passages = [p for p in passages if isinstance(p["text"], str) and p["text"].strip()]
     passages += _transcript_passages(name, cfg["chunk_seconds"], cfg["chunk_overlap_seconds"], cfg["chunk_max_chars"])
-    return ws, meeting, passages
+    lines = [{"start_s": l.get("start"), "end_s": l.get("end"), "speaker": l.get("speaker"), "text": l["text"].strip()}
+             for l in (t or {}).get("lines", []) if l.get("text", "").strip()]
+    return ws, meeting, passages, lines
 
 
 def _embed_text(meeting, p):
@@ -306,7 +331,7 @@ def _embed_text(meeting, p):
 def index_one(name):
     """(Re)index one meeting in its workspace's index (and out of any other). Returns the passage count."""
     cfg = config()
-    ws, meeting, passages = document(name, cfg)
+    ws, meeting, passages, lines = document(name, cfg)
     vectors = embed([_embed_text(meeting, p) for p in passages], cfg)
     cols = list(meeting)
     with connect(cfg) as conn, conn.transaction():
@@ -321,6 +346,10 @@ def index_one(name):
                      " embedding) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", schema),
                 [(name, p["kind"], i, p["text"], p.get("owner"), p.get("due"), p.get("start_s"), p.get("end_s"),
                   p.get("speakers"), _vec(v)) for i, (p, v) in enumerate(zip(passages, vectors))])
+            cur.executemany(
+                _sql("insert into {s}.lines (meeting, seq, start_s, end_s, speaker, text) values (%s, %s, %s, %s, %s, %s)",
+                     schema),
+                [(name, i, l["start_s"], l["end_s"], l["speaker"], l["text"]) for i, l in enumerate(lines)])
     return len(passages)
 
 
@@ -336,6 +365,26 @@ def remove(name, ws=None):
         targets = [schemas[ws]] if ws else list(schemas.values())
         return sum(conn.execute(_sql("delete from {s}.meetings where name = %s", s), (name,)).rowcount
                    for s in targets if s)
+
+
+def publish_registries():
+    """Copy the workspaces (and which is active) and each registry into the database, so the MCP server
+    can list workspaces and resolve misheard names without reading files on the Mac."""
+    active = labels.active()
+    with connect() as conn, conn.transaction():
+        conn.execute("delete from public.workspaces")
+        for w in labels.workspaces():
+            schema = _ensure(conn, w["id"])
+            conn.execute("insert into public.workspaces (id, name, schema, active) values (%s, %s, %s, %s)",
+                         (w["id"], w["name"], schema, w["id"] == active))
+            conn.execute(_sql("delete from {s}.entities", schema))
+            with conn.cursor() as cur:
+                cur.executemany(
+                    _sql("insert into {s}.entities (kind, name, aliases, status, note, org, role, client, first_seen,"
+                         " last_seen) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict do nothing", schema),
+                    [(e["kind"], e["name"], e.get("aliases") or [], e.get("status"), e.get("note"), e.get("org"),
+                      e.get("role"), e.get("client"), e.get("first_seen"), e.get("last_seen"))
+                     for e in labels.load(w["id"])["entities"]])
 
 
 # ---------- what needs doing ----------
@@ -369,6 +418,7 @@ def pending():
 
 def sync(log=print):
     """Index what is pending and drop what should not be indexed. Returns (indexed, removed, failed)."""
+    publish_registries()
     todo, stale, _ = pending()
     for ws, name in stale:  # first, so a meeting moved between workspaces is never in two
         remove(name, ws)

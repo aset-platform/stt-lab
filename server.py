@@ -369,6 +369,7 @@ async def keep_index_in_step(request, call_next):
     path = request.url.path
     if request.method == "POST" and response.status_code < 400 and (
             path.startswith("/api/library/") or path == "/api/llm/summarise"
+            or path == "/api/settings" or path.startswith("/api/registry")  # active workspace, registries
             or (path.startswith("/api/labels/") and path.endswith("/confirm"))):
         reindex_soon()
     return response

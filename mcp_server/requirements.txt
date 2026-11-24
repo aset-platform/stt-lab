@@ -1,0 +1,7 @@
+# The MCP server image (mcp_server/Dockerfile); same versions as the app's uv.lock
+mcp==2.3.0
+psycopg[binary]==3.3.9
+pgvector==0.5.1
+numpy==2.4.6
+uvicorn==0.54.0
+tzdata==2026.6

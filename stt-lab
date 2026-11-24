@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # One command for everything stt-lab needs:
-#   ./stt-lab up       start the index database (Docker), check Ollama, start the app, open the browser
-#   ./stt-lab down     stop the app and the database (data is kept in the Docker volume)
+#   ./stt-lab up       start the index database and MCP server (Docker), check Ollama, start the app,
+#                      open the browser
+#   ./stt-lab down     stop the app and the containers (data is kept in the Docker volume)
 #   ./stt-lab status   what is running
-#   ./stt-lab logs     follow the app's log
-# The database runs in Docker; the app and Ollama run natively so they can use the Apple GPU.
+#   ./stt-lab logs     follow the app's log (./stt-lab logs mcp: the MCP server's)
+# The database and MCP server run in Docker; the app and Ollama run natively for the Apple GPU.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,6 +14,10 @@ LOG=logs/server.log
 PIDFILE=logs/server.pid
 OLLAMA="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 EMBED_MODEL="$(.venv/bin/python -c 'import settings; print(settings.get("index")["embed_model"])' 2>/dev/null || echo qwen3-embedding:0.6b)"
+MCP_PORT="${STT_MCP_PORT:-8765}"
+# the MCP server reads "yesterday" in this Mac's time zone
+STT_TZ="${STT_TZ:-$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')}"
+export STT_TZ
 mkdir -p logs
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -29,8 +34,10 @@ db_up() {
     for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
     docker info >/dev/null 2>&1 || fail "Docker did not start in 2 minutes"
   fi
-  docker compose up -d --wait >/dev/null 2>&1 || fail "database container did not become healthy (docker compose logs db)"
+  docker compose up -d --build --wait >logs/compose.log 2>&1 \
+    || fail "containers did not become healthy (see logs/compose.log, docker compose logs)"
   ok "index database (pgvector) on 127.0.0.1:${STT_DB_PORT:-5433}"
+  ok "MCP server on http://127.0.0.1:$MCP_PORT/mcp (time zone ${STT_TZ:-UTC})"
 }
 
 ollama_up() {
@@ -65,13 +72,15 @@ case "${1:-up}" in
   down)
     echo "Stopping stt-lab"
     if pid=$(app_pid); then kill "$pid"; rm -f "$PIDFILE"; ok "app stopped"; else warn "app was not started by ./stt-lab (stop it where it runs)"; fi
-    docker compose stop >/dev/null 2>&1 && ok "database stopped (data kept)" ;;
+    docker compose stop >/dev/null 2>&1 && ok "database and MCP server stopped (data kept)" ;;
   status)
     if pid=$(app_pid); then ok "app running (pid $pid) on http://127.0.0.1:$PORT"
     elif port_busy; then ok "app running on port $PORT (started outside ./stt-lab)"
     else warn "app not running"; fi
-    docker compose ps --status running --services 2>/dev/null | grep -q db && ok "database running" || warn "database not running"
+    running="$(docker compose ps --status running --services 2>/dev/null || true)"
+    grep -qx db <<<"$running" && ok "database running" || warn "database not running"
+    grep -qx mcp <<<"$running" && ok "MCP server on http://127.0.0.1:$MCP_PORT/mcp" || warn "MCP server not running"
     curl -sf "$OLLAMA/api/tags" >/dev/null && ok "Ollama running" || warn "Ollama not running" ;;
-  logs) tail -f "$LOG" ;;
+  logs) if [[ "${2:-}" == mcp ]]; then docker compose logs -f mcp; else tail -f "$LOG"; fi ;;
   *) echo "usage: ./stt-lab up | down | status | logs"; exit 2 ;;
 esac
