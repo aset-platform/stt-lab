@@ -171,8 +171,16 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .fixw { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .fixw .lacts input[type=text] { font-size: 13px; padding: 3px 7px; width: 150px; }
 .fixw select { font-size: 12px; padding: 2px 6px; }
+.fixw.need { border-color: var(--danger); }
+.tag.need { color: var(--danger); border-color: var(--danger); }
+#spkDialog { max-width: 760px; width: calc(100% - 32px); border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); color: var(--text); padding: 16px 18px; }
+#spkDialog::backdrop { background: rgba(0, 0, 0, .35); }
+#spkDialog .dname { font-weight: 600; word-break: break-all; }
 .voice { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin-top: 10px; align-items: start; }
-.voice .who input { font-size: 13px; padding: 3px 7px; width: 100%; box-sizing: border-box; }
+.voice .who input[type=text] { font-size: 13px; padding: 3px 7px; width: 100%; box-sizing: border-box; }
+.voice .who label { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; cursor: pointer; }
+.voice .who label input { margin: 0; }
 .voice .said { font-size: 12px; color: var(--muted); margin: 0; padding-left: 14px; }
 .voice .said li { margin: 2px 0; }
 @media (max-width: 600px) { .voice { grid-template-columns: 1fr; } }
@@ -429,6 +437,11 @@ table.reg input { font-size: 12px; padding: 3px 6px; width: 100%; }
           while nothing is recording or transcribing, and if a recording starts it pauses after the current part
           (about 1 min) and goes on when the recording is done. Off: only the “Summarise queued” button runs it.</p></div>
         <input type="checkbox" data-set="llm.auto_pickup"></div>
+      <div class="setting"><div class="what"><b>Require speaker names before summarising</b>
+        <p class="hint">A meeting moved to “To summarise” asks who each voice is and waits until every voice has a name
+          (or “don't know”), so the summary puts tasks and remarks on the right people. A meeting with one voice is
+          you. Off: summarise with SPEAKER_00, SPEAKER_01… and name the voices afterwards.</p></div>
+        <input type="checkbox" data-set="llm.require_speaker_names"></div>
     </div>
     <div class="panel">
       <h2>Memory</h2>
@@ -581,7 +594,7 @@ function transcribe({ auto = false } = {}) {
       loadList();
       if (!auto) finish();  // with auto-summary the stream stays open for the summary result
     } else if (ev.type === "summary_done") { setStatus(summaryMsg(ev)); finish(); }
-    else if (ev.type === "summary_queued") { setStatus(ev.message); loadList(); finish(); }
+    else if (ev.type === "summary_queued") { setStatus(ev.message); loadList(); finish(); if (ev.needs_names) askSpeakerNames([ev.name]); }
     else if (ev.type === "summary_error") { setStatus(ev.message, true); finish(); }
     else if (ev.type === "error") { setStatus(ev.message, true); finish(); }
   };
@@ -816,7 +829,7 @@ async function startLive(fromTab) {
                      : `Live session saved as ${ev.recording}. Transcript improved and speakers labelled.`);
       if (!auto) finished = true;
     } else if (ev.type === "summary_done") { finished = true; setStatus(summaryMsg(ev)); }
-    else if (ev.type === "summary_queued") { finished = true; setStatus(ev.message); }
+    else if (ev.type === "summary_queued") { finished = true; setStatus(ev.message); if (ev.needs_names) askSpeakerNames([ev.name]); }
     else if (ev.type === "summary_error") { finished = true; setStatus(ev.message, true); }
     else if (ev.type === "error") { finished = true; setStatus(ev.message, true); stop(); }
   };
@@ -918,6 +931,8 @@ function renderTable() {
     const busy = lib.busy.includes(it.name);
     // busy covers both jobs; a transcript already handed to the LLM (queued) means it is being summarised
     const status = busy ? `<span class="tag acc">${it.queued ? "summarising…" : "transcribing…"}</span>`
+      : it.queued && it.needs_names ? `<span class="tag need" title="Name the voices to have it summarised">needs speaker names (${it.needs_names})</span>`
+      : it.summary && it.queued ? '<span class="tag acc">queued for a new summary</span>'
       : it.summary ? '<span class="tag ok">summarised</span>'
       : it.queued ? '<span class="tag acc">queued for LLM</span>'
       : it.transcripts.length ? '<span class="tag">transcribed</span>' : '<span class="tag">no transcript</span>';
@@ -939,7 +954,7 @@ function renderTable() {
     tr.querySelector("input").onchange = (e) => { e.target.checked ? picked.add(it.name) : picked.delete(it.name); renderSel(); };
     tr.querySelectorAll("[data-a]").forEach((el) => {
       const a = el.dataset.a;
-      if (a === "move") el.onchange = () => el.value && act(() => api("/api/library/move", { names: [it.name], folder: el.value }));
+      if (a === "move") el.onchange = () => el.value && act(() => moveTo([it.name], el.value));
       else el.onclick = () => rowAction(a, it);
     });
     body.appendChild(tr);
@@ -975,7 +990,7 @@ $("bulkWs").onchange = () => {
 };
 $("bulkMove").onchange = () => {
   const to = $("bulkMove").value;
-  if (to) act(() => api("/api/library/move", { names: [...picked], folder: to }));
+  if (to) act(() => moveTo([...picked], to));
 };
 $("bulkDelete").onclick = () => {
   const names = [...picked], permanent = !found && folder === "trash";
@@ -1064,42 +1079,90 @@ async function renderDetail() {
 }
 
 // ---- name the voices: SPEAKER_00 = Marlow. Summaries, the index and the transcript then use the names ----
-async function addSpeakerBox(it) {
-  $("detail").insertAdjacentHTML("beforeend", `<div class="fixw" id="spkBox"><b>Speakers</b>
-    <div id="spkBody" class="meta">Loading voices…</div></div>`);
+// speakerForm fills `el` with one row per voice; onSaved(result) runs after a save. Used under a meeting's
+// summary (addSpeakerBox) and in the dialog that opens when a meeting is queued (askSpeakerNames).
+async function speakerForm(el, it, { dialog = false, onSaved = () => {}, onLater = () => {} } = {}) {
+  el.innerHTML = '<p class="meta">Loading voices…</p>';
   let info;
   try { info = await api(`/api/speakers/${encodeURIComponent(it.name)}`); }
-  catch (e) { if ($("spkBody")) $("spkBody").textContent = e.message; return; }
-  if (focus !== it.name || !$("spkBody")) return;
+  catch (e) { el.innerHTML = `<p class="meta">${esc(e.message)}</p>`; return; }
   const mins = (s) => s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
-  const named = Object.keys(info.names).length;
-  $("spkBody").className = "";
-  $("spkBody").innerHTML = `<p class="hint" style="margin:4px 0 0">Who is each voice? The summary, the transcript and the
-      index then use the name, so what each person said and took on is put to the right person.
-      ${named ? "" : `<b style="color:var(--danger)">Not named yet</b>: the summariser has to guess who is who.`}
-      ${info.your_name ? `You are <b>${esc(info.your_name)}</b> (Settings → Recording).` : "Set your name in Settings → Recording to help it when voices are not named."}</p>
+  const missing = info.voices.filter((v) => !info.names[v.label]).length;
+  const waiting = it.queued;
+  el.innerHTML = `<p class="hint" style="margin:4px 0 0">Who is each voice? The summary, the transcript and the index use
+      the names, so what each person said and took on goes to the right person.
+      ${waiting && missing ? `<b style="color:var(--danger)">The summary waits until every voice is named.</b>` : ""}
+      Tick “don't know” for a guest you can't place or a voice with only a few stray lines.
+      ${info.your_name ? `You are <b>${esc(info.your_name)}</b>.` : "Set your name in Settings → Recording."}</p>
     <datalist id="spkPeople">${[info.your_name, ...info.people].filter(Boolean).map((p) => `<option value="${esc(p)}">`).join("")}</datalist>
-    ${info.voices.map((v) => `<div class="voice"><div class="who"><b>${esc(v.label.replace("SPEAKER_", "Speaker "))}</b>
+    ${info.voices.map((v) => {
+      const cur = info.names[v.label] || "", unknown = cur === "?";
+      return `<div class="voice"><div class="who"><b>${esc(v.label.replace("SPEAKER_", "Speaker "))}</b>
         <div class="meta">${mins(v.seconds)} · ${v.lines} lines</div>
-        <input type="text" list="spkPeople" data-label="${esc(v.label)}" value="${esc(info.names[v.label] || "")}" placeholder="name"></div>
-      <ul class="said">${v.samples.map((x) => `<li>[${esc(x.at)}] ${esc(x.text)}</li>`).join("")}</ul></div>`).join("")}
-    <div class="lacts" style="margin-top:10px"><button id="spkSave">Save names</button>
-      ${it.summary ? '<button class="primary" id="spkRedo">Save and re-summarise</button>' : ""}
-      <span class="meta" id="spkOut"></span></div>`;
+        <input type="text" list="spkPeople" data-label="${esc(v.label)}" value="${esc(unknown ? "" : cur)}" placeholder="name" ${unknown ? "disabled" : ""}>
+        <label class="meta"><input type="checkbox" class="dk" ${unknown ? "checked" : ""}> don't know</label></div>
+      <ul class="said">${v.samples.map((x) => `<li>[${esc(x.at)}] ${esc(x.text)}</li>`).join("")}</ul></div>`; }).join("")}
+    <div class="lacts" style="margin-top:10px">
+      ${dialog ? '<button class="primary" data-s="queue">Save and summarise</button><button data-s="later">Later</button>'
+        : `<button ${it.summary && !waiting ? "" : 'class="primary"'} data-s="save">Save names</button>` +
+          (it.summary && !waiting ? '<button class="primary" data-s="redo">Save and re-summarise</button>' : "")}
+      <span class="meta spkOut"></span></div>`;
+  el.querySelectorAll(".voice").forEach((row) => {
+    const box = row.querySelector(".dk"), inp = row.querySelector("input[data-label]");
+    box.onchange = () => { inp.disabled = box.checked; if (box.checked) inp.value = ""; };
+  });
+  const out = el.querySelector(".spkOut");
   const save = async (resummarise) => {
-    const names = {};
-    $("spkBox").querySelectorAll("input[data-label]").forEach((i) => (names[i.dataset.label] = i.value.trim()));
-    $("spkBox").querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const names = {}, open = [];
+    el.querySelectorAll(".voice").forEach((row) => {
+      const inp = row.querySelector("input[data-label]"), dk = row.querySelector(".dk").checked;
+      names[inp.dataset.label] = dk ? "?" : inp.value.trim();
+      if (!dk && !inp.value.trim()) open.push(inp.dataset.label.replace("SPEAKER_", "Speaker "));
+    });
+    if (dialog && open.length) { out.textContent = `Still to name: ${open.join(", ")} (or tick “don't know”).`; return; }
+    el.querySelectorAll("button").forEach((b) => (b.disabled = true));
     try {
       const r = await api(`/api/speakers/${encodeURIComponent(it.name)}`, { names, resummarise });
-      $("spkOut").textContent = r.queued ? "Saved. Queued for a new summary; it starts when nothing is recording."
+      out.textContent = r.queued ? "Saved. Queued for a new summary; it starts when nothing is recording."
+        : open.length && waiting ? `Saved. Still to name: ${open.join(", ")}.`
+        : waiting ? "Saved. It is summarised as soon as nothing is recording."
         : `Saved ${Object.keys(r.names).length} name(s).` + (it.summary ? " Re-summarise to use them in the summary." : "");
-      if (r.queued) setTimeout(loadLibrary, 800);
-    } catch (e) { $("spkOut").textContent = e.message; }
-    $("spkBox").querySelectorAll("button").forEach((b) => (b.disabled = false));
+      onSaved(r);
+    } catch (e) { out.textContent = e.message; }
+    el.querySelectorAll("button").forEach((b) => (b.disabled = false));
   };
-  $("spkSave").onclick = () => save(false);
-  if ($("spkRedo")) $("spkRedo").onclick = () => save(true);
+  el.querySelectorAll("[data-s]").forEach((b) => (b.onclick = () =>
+    b.dataset.s === "later" ? onLater() : save(b.dataset.s === "redo")));
+}
+
+function addSpeakerBox(it) {
+  const first = it.queued && it.needs_names;  // waiting for names: put the box first
+  const html = `<div class="fixw${first ? " need" : ""}" id="spkBox"><b>Speakers</b><div id="spkBody"></div></div>`;
+  const anchor = first && $("detail").querySelector(".meta");
+  anchor ? anchor.insertAdjacentHTML("afterend", html) : $("detail").insertAdjacentHTML("beforeend", html);
+  speakerForm($("spkBody"), it, { onSaved: (r) => setTimeout(() => { loadLibrary(); loadLlm(); }, r.queued ? 800 : 0) });
+}
+
+// Moving to "To summarise" (or a recording that queued itself): ask for the names of each meeting that
+// needs them, one dialog after the other. "Later" leaves it waiting with a badge.
+async function askSpeakerNames(names) {
+  for (const name of names) {
+    const it = { name, queued: true, summary: false };
+    await new Promise((done) => {
+      const dlg = $("spkDialog");
+      dlg.querySelector(".dname").textContent = name;
+      const close = () => { dlg.close(); done(); };
+      dlg.onclose = () => done();
+      speakerForm(dlg.querySelector(".dbody"), it, { dialog: true, onLater: close,
+        onSaved: () => setTimeout(close, 600) });
+      if (!dlg.open) dlg.showModal();
+    });
+  }
+  loadLibrary(); loadLlm();
+}
+async function moveTo(names, folder) {
+  const r = await api("/api/library/move", { names, folder });
+  if (r.needs_names?.length) setTimeout(() => askSpeakerNames(r.needs_names), 0);
 }
 
 // ---- fix a misheard word: corrects this meeting and teaches the workspace registry ----
@@ -1201,7 +1264,8 @@ async function loadLlm() {
   const a = s.auto || {};
   const autoMsg = a.running ? (a.paused ? ` Summarising ${a.running}: paused while recording.` : ` Summarising ${a.running}…`)
     : a.on && s.queued.length ? " They are summarised automatically when nothing is recording." : "";
-  $("llmMsg").innerHTML = esc(s.ok ? `${s.queued.length} transcript(s) queued.${autoMsg}` :
+  const wait = s.waiting_names?.length ? ` ${s.waiting_names.length} wait(s) for speaker names.` : "";
+  $("llmMsg").innerHTML = esc(s.ok ? `${s.queued.length} transcript(s) queued.${wait}${autoMsg}` :
     `${s.message}. Queued transcripts wait in llm/inbox/ until it is available.`) +
     ' <a class="cfglink" style="color:var(--accent);cursor:pointer">Change model in Settings</a>';
   $("llmMsg").querySelector(".cfglink").onclick = () => showView("viewSettings");
@@ -1707,5 +1771,7 @@ $("wsTop").onchange = async () => {
 initSettings();
 loadWorkspaces().then(loadList);
 </script>
+<dialog id="spkDialog"><b>Who is speaking?</b> <span class="meta">Name the voices to have this meeting summarised</span>
+  <div class="dname"></div><div class="dbody"></div></dialog>
 </body>
 </html>

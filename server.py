@@ -270,9 +270,13 @@ def summarise_after(name, emit):
     Always ends with exactly one summary_queued, summary_done or summary_error event. With llm.auto_pickup
     on it only queues: the picker summarises it as soon as nothing is recording."""
     try:
-        library.move([name], "to_summarise")
+        waiting = library.move([name], "to_summarise")
     except Exception as e:
         return emit({"type": "summary_error", "message": f"Could not queue for summary: {e}"})
+    if waiting:
+        return emit({"type": "summary_queued", "name": name, "needs_names": True,
+                     "message": "Transcript done. Name the speakers to have it summarised: it waits in "
+                                "'To summarise' until every voice has a name."})
     if settings.get("llm").get("auto_pickup", True):
         return emit({"type": "summary_queued", "name": name,
                      "message": "Transcript done. Queued in 'To summarise': it is summarised automatically "
@@ -532,7 +536,8 @@ def _picker():
             if not settings.get("llm").get("auto_pickup", True) or activity.n or _auto["running"]:
                 continue
             todo = sorted((n for n in summarise.queued()
-                           if n not in busy and _auto["failed"].get(n) != _inbox_mtime(n)),
+                           if n not in busy and _auto["failed"].get(n) != _inbox_mtime(n)
+                           and not library.needs_names(n)),
                           key=lambda n: _inbox_mtime(n) or 0)
             if not todo or not summarise.check()["ok"]:
                 continue
@@ -633,8 +638,7 @@ def library_list():
 @app.post("/api/library/move")
 def library_move(names: list[str] = Body(), folder: str = Body()):
     _not_busy(names)
-    library.move(names, folder)
-    return {"ok": True}
+    return {"ok": True, "needs_names": library.move(names, folder)}
 
 
 @app.get("/api/speakers/{name}")
@@ -728,9 +732,12 @@ def library_summary(name: str):
 # ---------- LLM summaries ----------
 @app.get("/api/llm/status")
 def llm_status():
-    # a recording being auto-summarised is still in the inbox; don't offer it for a second run
+    # a recording being auto-summarised is still in the inbox; don't offer it for a second run. Meetings
+    # whose voices are not named yet wait apart (waiting_names) and are not offered either.
+    mine = [n for n in summarise.queued() if n not in busy and library.workspace_of(n) == labels.active()]
+    waiting = [n for n in mine if library.needs_names(n)]
     return {**summarise.check(), "models": summarise.models(),
-            "queued": [n for n in summarise.queued() if n not in busy and library.workspace_of(n) == labels.active()],
+            "queued": [n for n in mine if n not in waiting], "waiting_names": waiting,
             "auto": {"on": bool(settings.get("llm").get("auto_pickup", True)), "running": _auto["running"],
                      "paused": _auto["paused"], "failed": sorted(_auto["failed"])}}
 

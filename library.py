@@ -123,6 +123,7 @@ def drop_repeats(lines, window=4):
 
 
 _LABEL = re.compile(r"SPEAKER_\d+")
+UNKNOWN = "?"  # "don't know": the voice is answered for, and stays SPEAKER_nn in the transcript
 
 
 def speaker_names(name):
@@ -141,7 +142,7 @@ def set_speaker_names(name, names):
         if not _LABEL.fullmatch(str(label)):
             raise LibraryError(f"not a speaker label: {label!r}")
         if who:
-            if _LABEL.fullmatch(who.upper().replace(" ", "_")):
+            if who != UNKNOWN and _LABEL.fullmatch(who.upper().replace(" ", "_")):
                 raise LibraryError(f"give {label} a person's name, not a label")
             clean[label] = who
     p = LLM_SPEAKERS / f"{name}.json"
@@ -159,7 +160,37 @@ def name_speakers(lines, names):
     """The lines with each named SPEAKER_nn replaced by the person's name (new dicts; others unchanged)."""
     if not names:
         return lines
-    return [{**l, "speaker": names.get(l.get("speaker"), l.get("speaker"))} for l in lines]
+    return [{**l, "speaker": who if (who := names.get(l.get("speaker"))) and who != UNKNOWN else l.get("speaker")}
+            for l in lines]
+
+
+def voices(t):
+    """The SPEAKER_nn labels that say something in a transcript (as saved, before names are applied)."""
+    return sorted({l["speaker"] for l in (t or {}).get("lines", []) if l.get("speaker") and l.get("text", "").strip()})
+
+
+def missing_speakers(name, t=None, save=False):
+    """Voices with neither a name nor "don't know". A meeting with a single voice is yours: with your name
+    set (Settings → Recording) it counts as named, and `save` writes that down."""
+    t = t if t is not None else best_transcript(name, named=False)
+    labels_ = voices(t)
+    names = speaker_names(name)
+    missing = [l for l in labels_ if l not in names]
+    me = str(settings.get("recording").get("your_name") or "").strip()
+    if len(labels_) == 1 and missing and me:
+        if save:
+            set_speaker_names(name, {labels_[0]: me})
+        return []
+    return missing
+
+
+def names_required():
+    return bool(settings.get("llm").get("require_speaker_names", True))
+
+
+def needs_names(name, t=None):
+    """True while a meeting must wait for its voices to be named before it is summarised."""
+    return names_required() and bool(missing_speakers(name, t))
 
 
 def best_transcript(name, named=True):
@@ -259,7 +290,9 @@ def items(ws=None):
                 "duration": stats.get("duration"),
                 "speakers": stats.get("speakers"),
                 "transcripts": sorted(f.name[len(p.name) + 1:-5] for f in TRANSCRIPTS.glob(f"{glob_escape(p.name)}.*.json")),
-                "queued": (LLM_INBOX / f"{p.name}.md").is_file(),
+                "queued": (queued := (LLM_INBOX / f"{p.name}.md").is_file()),
+                # voices still to name before the queue may summarise it (0 when not required)
+                "needs_names": len(missing_speakers(p.name, t)) if queued and t and names_required() else 0,
                 "summary": (LLM_SUMMARIES / f"{p.name}.md").is_file(),
                 "title": _title(p.name),
                 "labels": _label_status(p.name),
@@ -312,11 +345,13 @@ def move(names, folder):
         for name in names:
             audio_path(name)
             if folder == "to_summarise":
+                missing_speakers(name, save=True)  # a single voice gets your name before the hand-off
                 export_handoff(name)  # raises if there is no transcript, leaving the index unchanged
             elif folder_of(name, index) == "to_summarise":
                 (LLM_INBOX / f"{name}.md").unlink(missing_ok=True)  # taken out of the queue
             index.setdefault(name, {})["folder"] = folder
         _save(index)
+    return [n for n in names if folder == "to_summarise" and needs_names(n)]
 
 
 def mark_summarised(name):
