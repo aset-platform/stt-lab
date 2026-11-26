@@ -58,7 +58,16 @@ ABUSE = re.compile(
     r"bewakoof\w*|ullu|gadh[ae]|lund|randi|kutt[ae]|kuttiya|bc|mc)\b",
     re.I)
 
-RULES = {"money": MONEY, "deal": DEAL, "sensitive": SENSITIVE, "abuse": ABUSE}
+# office politics and judgements of a person's character ("political issues between Marlow and Tamsin"):
+# gossip, not a work fact. Narrow on purpose: plain "conflict between" (schedules) or "non-technical
+# users" are ordinary work talk and stay.
+GOSSIP = re.compile(
+    r"\b(?:politic(?:s|al|king)(?!\s+(?:risks?|exposures?|part(?:y|ies)|science|climate|instability))|office\s+politics|power\s+struggles?|bad\s+blood|backstab\w*|"
+    r"(?:not|don't|doesn't|do\s+not|does\s+not)\s+get\s+along|not\s+on\s+(?:good\s+)?(?:speaking\s+)?terms|"
+    r"incompeten\w*|clueless|ego\s+(?:clash|issues?|problems?))\b",
+    re.I)
+
+RULES = {"money": MONEY, "deal": DEAL, "sensitive": SENSITIVE, "abuse": ABUSE, "gossip": GOSSIP}
 _SENTENCES = re.compile(r"(?<=[.;!?])\s+")
 _LINE_HEAD = re.compile(r"^(\[[\d:]+\]\s*[^:\n]{1,40}:\s*)(.*)$")  # "[12:34] SPEAKER_00: text"
 # keys whose values are identifiers or bookkeeping, never meeting text

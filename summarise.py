@@ -565,15 +565,54 @@ def _similar(a, b):
     return SequenceMatcher(None, a, b).ratio() >= 0.85
 
 
-def _dedupe(items, text=str):
-    """`items` without near-repeats; of two alike, the longer (more detailed) one is kept in place."""
+_STOP = set("""a an the and or but of to in on for with by from at as is are was were be been being this that these
+those it its into than then so not no do does did will would can could should may might must has have had their there
+they them our we you your he she his her who whom which what when where why how all any each also only just more most
+such via per eg""".split())
+
+
+def _key_words(text):
+    """The content words of a point, roughly stemmed ("building" and "build" are one word)."""
+    out = set()
+    for w in _norm(text).split():
+        if len(w) > 2 and w not in _STOP:
+            for suf in ("ing", "ed", "es", "s"):
+                if len(w) > 4 and w.endswith(suf):
+                    w = w[:-len(suf)]
+                    break
+            out.add(w)
+    return out
+
+
+def _same_point(a, b, share=0.6, least=5):
+    """The same point reworded: at least `least` content words in common, making up `share` of the
+    shorter one's, in any order ("Confirmed Postgres as the main store for billing event logs" /
+    "Billing event logs will use Postgres as the main store, as confirmed; backups run nightly")."""
+    wa, wb = _key_words(a), _key_words(b)
+    common = len(wa & wb)
+    return bool(wa and wb) and common >= least and common / min(len(wa), len(wb)) >= share
+
+
+# how alike two points of a list must be to count as one: summary bullets are long and share words by
+# topic, so they need more in common than decisions and questions
+_SAME = {"summary": (0.75, 8), "decisions": (0.55, 5), "open_questions": (0.55, 5)}
+
+
+def _dedupe(items, text=str, same=None):
+    """`items` without near-repeats; of two alike, the longer (more detailed) one is kept in place.
+    `same` = (share, least) also merges points that say the same in other words (_same_point)."""
+    alike = (lambda a, b: _similar(a, b) or _same_point(a, b, *same)) if same else _similar
     out = []
     for x in items:
-        i = next((j for j, y in enumerate(out) if _similar(text(x), text(y))), None)
-        if i is None:
+        hits = [j for j, y in enumerate(out) if alike(text(x), text(y))]
+        if not hits:
             out.append(x)
-        elif len(text(x)) > len(text(out[i])):
-            out[i] = x
+            continue
+        # x may tie together points kept apart so far: all of them become one, the most detailed
+        best = max([x] + [out[j] for j in hits], key=lambda y: len(text(y)))
+        out[hits[0]] = best
+        for j in reversed(hits[1:]):
+            del out[j]
     return out
 
 
@@ -583,7 +622,7 @@ def dedupe_notes(notes):
     n = 0
     for key in ("summary", "decisions", "open_questions"):
         items = [x for x in notes.get(key) or [] if str(x).strip()]
-        kept = _dedupe(items)
+        kept = _dedupe(items, same=_SAME[key])
         n += len(items) - len(kept)
         notes[key] = kept
     acts = [a for a in notes.get("action_items") or [] if isinstance(a, dict)]

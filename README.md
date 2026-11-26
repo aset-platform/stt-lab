@@ -200,7 +200,7 @@ as one call. `llm.keep_alive` ("30m") keeps the model loaded between the parts.
 | Owners | "With Tamsin, you have to…" is the listener's task; an owner named in their own task becomes `unassigned` |
 | Only people who were discussed | a person must be named in the transcript and have something concrete (a stated role, an action item, notes beyond "mentioned"); names the model took from the registry list are dropped, and so is someone named once whose notes only say they came up ("Mentioned as…", "Addressed by…") (`check_people`) |
 | No voice labels | `SPEAKER_01` never appears in the notes: an owner that is a label becomes `unassigned`, and in text it becomes "a participant" (`drop_speaker_labels`). Name the voices to get names instead ([below](#who-is-who-naming-the-voices)) |
-| Each point once | near-repeats in summary, decisions, questions, action items and a person's notes are removed, the more detailed one kept (`dedupe_notes`) |
+| Each point once | near-repeats in summary, decisions, questions, action items and a person's notes are removed, the more detailed one kept (`dedupe_notes`). Reworded repeats too: two decisions or questions sharing 55% of their key words (at least 5, in any order) are one point; summary bullets need 75% and 8 words, as they share words by topic |
 | Left out | deal and commercial details, any money amount, remarks about someone's background, swearing and insults, sarcasm, gossip. The guardrail patterns then drop any sentence that still has one ([below](#keeping-sensitive-content-away-from-ai-assistants)) |
 
 `_meta` in each summary's JSON records what the checks cleared (`cleared_without_evidence`,
@@ -404,7 +404,8 @@ and abuse must not reach them, so there are three layers:
 1. **The summary prompt** asks the model to leave them out (see [Summaries](#summaries-and-action-items)).
 2. **Guardrail patterns** (`mcp_server/guardrails.py`) catch amounts ("$1.3M", "1.3 million for a year",
    "2 crore"; technical counts such as "1.3 million rows" are kept), deal terms (pricing, budget, margin,
-   invoice…), remarks about origin, race or religion, and swearing in English and Hindi. They run twice: on
+   invoice…), remarks about origin, race or religion, swearing in English and Hindi, and gossip (office politics, people
+   not getting along, "incompetent"; "political risk" and other business uses are left alone). They run twice: on
    every summary after the model wrote it (the sentence is dropped) and on every MCP answer (it becomes
    `[removed]`; the audit log counts them as `removed`).
 3. **Screening by meaning when indexing** (`share_filter.py`, `prompts/share_filter.md`): the local LLM reads
@@ -574,7 +575,7 @@ speech; on clean YouTube audio it was essentially word-perfect.
 | `library.py` | Folders, rename, delete, and writing transcripts to `llm/inbox/` |
 | `summarise.py` | LLM summariser (OpenAI-compatible API): parts, merge, evidence/hierarchy/owner checks, and its CLI |
 | `prompts/meeting_summary.md`, `prompts/meeting_tidy.md` | Instructions given to the LLM: the summary, and the tidy pass after a meeting in parts |
-| `mcp_server/guardrails.py` | Guardrail patterns: amounts, deal terms, sensitive remarks, abuse; used on summaries and MCP answers |
+| `mcp_server/guardrails.py` | Guardrail patterns: amounts, deal terms, sensitive remarks, abuse, gossip; used on summaries and MCP answers |
 | `share_filter.py`, `prompts/share_filter.md` | Screening by meaning before indexing; restricted items never reach MCP clients |
 | `evaluate.py` | Scores a summary against its transcript: names missed, LLM judge |
 | `observe.py` | The Observability page: restricted items, MCP calls matched by fingerprint, self-checks, client-log scan |
