@@ -210,15 +210,26 @@ as one call. `llm.keep_alive` ("30m") keeps the model loaded between the parts.
 ### Who is who (naming the voices)
 
 Diarisation only tells voices apart (`SPEAKER_00`, `SPEAKER_01`); left to guess, the model easily puts
-one person's tasks on the other ("your name is Marlow" is said *to* Marlow, not by him). Two helps:
+one person's tasks on the other ("your name is Marlow" is said *to* Marlow, not by him). So the voices are
+named **before** a meeting is summarised:
 
-- **Speakers box** (under a meeting's summary in Manage): each voice with its talk time and three of its
-  longer lines, and a name field (workspace people are suggested). **Save and re-summarise** queues the
-  meeting again. Names are kept in `llm/speakers/<recording>.json` and used by the summary, the
-  transcript view and the index; a meeting already queued gets the names in its hand-off at once.
-- **Your name** (Settings → Recording): the hand-off header then says `recorded_by: <you>`, so the model
-  knows you are one of the voices and works out which from what is said. The prompt also says a name
-  someone is addressed by belongs to the other speaker, and that whoever says "I will…" owns the task.
+- **Names first.** Moving a meeting to "To summarise" (or a recording queueing itself) opens a **Who is
+  speaking?** dialog: each voice with its talk time and three of its longer lines, and a name field
+  (workspace people are suggested). **Save and summarise** queues it; **Later** leaves it in "To
+  summarise" marked **needs speaker names**, and the summary line says how many wait. The queue, the
+  "Summarise queued" button and `summarise.py` all skip it until every voice has a name.
+- **Don't know.** A guest you can't place, or a stray voice diarisation made from a few lines, can be
+  ticked "don't know": it counts as answered and stays `SPEAKER_nn` (the notes then say "a participant").
+  Two labels may get the same name when diarisation split one person.
+- **One voice is you.** A meeting with a single voice takes your name (below) without asking.
+- **Fixing later.** The **Speakers** box under a summary changes names; **Save and re-summarise** queues
+  it again. Names are kept in `llm/speakers/<recording>.json` and used by the summary, the transcript
+  view and the index; a meeting already queued gets the names in its hand-off at once.
+- **Your name** (Settings → Recording): the hand-off header says `recorded_by: <you>`. The prompt also
+  says a name someone is addressed by belongs to the other speaker, and that whoever says "I will…" owns
+  the task.
+- **Off switch.** Settings → Summariser → *Require speaker names before summarising*
+  (`llm.require_speaker_names`); off, meetings are summarised with `SPEAKER_nn` as before.
 
 **Whisper's silence filler** is removed before anything reads a transcript (`library.drop_repeats`): a phrase
 looped three or more times in a row ("okay okay okay…") is kept once, and a line that repeats one of

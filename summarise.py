@@ -185,11 +185,16 @@ def check():
 
 
 def _parse_json(text):
-    """The model is asked for bare JSON; tolerate code fences or text around it."""
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
+    """The model is asked for bare JSON; tolerate code fences or text around it, and anything after the
+    object (a small model sometimes adds a second object or a note): the first complete object wins."""
+    start = text.find("{")
+    if start < 0:
         raise ValueError("model reply contained no JSON object")
-    return json.loads(m.group(0))
+    try:
+        return json.JSONDecoder().raw_decode(text[start:])[0]
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)  # e.g. a stray "{" in text before the object
+        return json.loads(m.group(0))
 
 
 UNDEFINED = "undefined"
@@ -770,6 +775,9 @@ def summarise_one(name, model=None, pause=None, log=print):
     src = library.LLM_INBOX / f"{name}.md"
     if not src.is_file():
         raise library.LibraryError(f"{name} is not queued; move it to 'To summarise' first")
+    if library.needs_names(name):
+        raise library.LibraryError(f"{name} waits for speaker names: name its voices (Speakers) first, "
+                                   "or turn off 'Require speaker names' in Settings")
     ws = labels.of(name)  # the recording's own workspace, whichever is selected in the header now
     try:
         notes = make_notes(cfg, model, name, src.read_text(), ws, log=log, pause=pause)

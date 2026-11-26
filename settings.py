@@ -37,6 +37,8 @@ DEFAULTS = {
         "keep_alive": "30m",       # Ollama: keep the model loaded between the calls of one summary
         "auto_pickup": True,       # summarise whatever is in "To summarise" on its own, one at a time, only
                                    # while nothing is recording or transcribing (it pauses between parts)
+        "require_speaker_names": True,  # the queue holds a meeting until every voice has a name (or
+                                        # "don't know"); one voice is you (recording.your_name)
         "chunk_minutes": 10,       # summarise long meetings in parts of ~10 min (0 = one call for the whole)
         "max_input_tokens": 100_000,  # ~2 h of meeting is ~30k tokens
         "unload_after_summary": True,  # free the model's memory as soon as a summary is written
