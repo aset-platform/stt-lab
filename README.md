@@ -33,15 +33,25 @@ Why these choices (all measured, see [Evaluation](#evaluation-results)):
 
 ## Setup
 
-Requirements: **Apple Silicon Mac** (M1 or newer; MLX does not run on Intel Macs), 16 GB RAM recommended
-(24 GB+ is more comfortable with the LLM), [`uv`](https://docs.astral.sh/uv/)
-(`curl -LsSf https://astral.sh/uv/install.sh | sh`), Chrome or Edge (for tab recording), and
-[Ollama](https://ollama.com/download) for summaries. No Hugging Face account, token or ffmpeg is needed.
+### Prerequisites
+
+| What | Needed for | Install / check |
+|---|---|---|
+| **Apple Silicon Mac** (M1 or newer), macOS | everything: MLX (Whisper) does not run on Intel Macs, Linux or Windows | Apple menu → About This Mac |
+| **16 GB RAM** (24 GB+ is more comfortable with the LLM) | transcription peaks at ~5.8 GB, the summariser LLM needs ~13 GB more | |
+| **~20 GB free disk** | Python deps (~2 GB), Whisper medium (~1.5 GB), gpt-oss-20b (~13 GB) | |
+| **git** | cloning | `xcode-select --install` (Command Line Tools) |
+| [**uv**](https://docs.astral.sh/uv/) | Python 3.11 and all dependencies (installs Python for you) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| [**Ollama**](https://ollama.com/download) | summaries, action items and the search-index embeddings | `ollama --version` |
+| [**Docker Desktop**](https://www.docker.com/products/docker-desktop/) | optional: the search index (Postgres + pgvector) and the MCP server | `docker info` |
+| **Chrome or Edge** | optional: recording a browser tab (meetings in Meet/Teams/Zoom web) | |
+
+Not needed: a Hugging Face account or token, ffmpeg, or any cloud API key. Everything runs on your Mac.
 
 ### 1. Clone and install
 
 ```bash
-git clone git@github.com:aset-platform/stt-lab.git    # private repo: needs access to the aset-platform org
+git clone https://github.com/aset-platform/stt-lab.git
 cd stt-lab
 uv sync                                  # Python 3.11 + all dependencies into .venv (~2 GB, a few minutes)
 ```
@@ -56,6 +66,7 @@ git config core.hooksPath .githooks
 
 ```bash
 ollama pull gpt-oss:20b                  # ~13 GB, once
+ollama pull qwen3-embedding:0.6b         # ~0.6 GB, embeddings for the search index (skip without Docker)
 uv run server.py                         # then Settings tab → Summariser: "Create 32k copy", then "Use"
 uv run summarise.py --check              # should print: ... ready
 ```
@@ -586,8 +597,25 @@ speech; on clean YouTube audio it was essentially word-perfect.
 
 ## Troubleshooting
 
-- **`401` / `403` / `GatedRepoError` for pyannote**: the `models/` folder is missing; copy it back from
-  the zip.
+- **`401` / `403` / `GatedRepoError` for pyannote**: the `models/` folder is missing or incomplete;
+  restore it with `git checkout -- models/`.
+- **`./stt-lab up` says Docker is not running**: start Docker Desktop, or skip the index and run
+  `uv run server.py` instead.
+- **Summaries never start**: `uv run summarise.py --check` tells you whether Ollama is running and the
+  model is pulled.
+
+## Contributing
+
+`main` is protected: changes go through a pull request, and every pull request needs the owner's
+approval before it can be merged (see `.github/CODEOWNERS`). Fork the repo (or create a branch if you
+have access), enable the pre-commit checks (`git config core.hooksPath .githooks`), and open a pull
+request against `main`. Never commit real meeting recordings, transcripts, summaries or registries:
+only the synthetic `sample-*` files are tracked, and CI rejects other audio.
+
+## License
+
+[MIT](LICENSE). The bundled pyannote speaker model is CC-BY-4.0, see
+`models/pyannote-speaker-diarization-community-1/ATTRIBUTION.md`.
 - **First start fails while downloading Whisper**: check the internet connection and start again; the
   download resumes.
 - **Tab recording: green bar doesn't move**: you shared a Window/Screen or turned off "Also share tab
